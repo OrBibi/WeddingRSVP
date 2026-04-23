@@ -1,4 +1,4 @@
-import { firestore } from '../../../_lib/firebaseAdmin';
+import { firestore } from '../../../_lib/firebaseAdmin.js';
 
 type GuestStatus = 'Pending' | 'Attending' | 'Not Attending';
 
