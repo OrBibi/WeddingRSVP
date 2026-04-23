@@ -167,12 +167,14 @@ export default function RSVP({ theme }: RSVPProps) {
         <div
           className={`w-full animate-fade-in animate-float rounded-3xl border p-8 shadow-2xl backdrop-blur-xl sm:p-12 ${selectedTheme.card} text-base sm:text-lg`}
         >
-          <h2 className="animate-slide-up text-4xl font-semibold tracking-wide text-wedding-charcoal sm:text-5xl lg:text-6xl">
-            נשמח לראותכם
-          </h2>
-          <p className="mt-4 animate-slide-up font-sans text-lg text-slate-600 sm:text-xl">
-            אישור הגעה דרך הזמנה אישית
-          </p>
+          <header className="animate-slide-up text-center">
+            <h2 className="text-4xl font-semibold tracking-wide text-wedding-charcoal sm:text-5xl lg:text-6xl">
+              נשמח לראותכם
+            </h2>
+            <p className="mt-4 font-sans text-lg text-slate-600 sm:text-xl">
+              אור וקרן אור - 11.5
+            </p>
+          </header>
 
           <div className="mt-8 animate-slide-up">
             {loading && <p className="text-lg text-slate-600 sm:text-xl">טוען הזמנה אישית...</p>}
