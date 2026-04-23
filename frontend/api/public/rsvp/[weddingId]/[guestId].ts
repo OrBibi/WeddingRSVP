@@ -20,6 +20,7 @@ const weddingGuestsCollection = (weddingId: string) =>
 export default async function handler(req: any, res: any) {
   const weddingId = parsePathParam(req.query.weddingId);
   const guestId = parsePathParam(req.query.guestId);
+  const requestMethod = String(req.method ?? 'UNKNOWN');
 
   if (!weddingId || !guestId) {
     return res.status(400).json({ message: 'weddingId and guestId are required.' });
@@ -40,7 +41,7 @@ export default async function handler(req: any, res: any) {
     rsvpToken?: string;
   };
 
-  if (req.method === 'GET') {
+  if (requestMethod === 'GET') {
     const token = String(req.query.token ?? '');
     if (!token || guest.rsvpToken !== token) {
       return res.status(404).json({ message: 'Invitation not found.' });
@@ -55,7 +56,7 @@ export default async function handler(req: any, res: any) {
     });
   }
 
-  if (req.method === 'PUT') {
+  if (requestMethod === 'PUT') {
     const { token, status, partySize } = req.body as {
       token?: string;
       status?: GuestStatus;
