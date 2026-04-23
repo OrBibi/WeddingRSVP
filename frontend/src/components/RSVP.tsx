@@ -9,7 +9,7 @@ import {
 import type { RSVPTheme } from '../App';
 
 const statusLabelMap: Record<GuestStatus, string> = {
-  Pending: 'ממתין',
+  Pending: 'מתלבט',
   Attending: 'מגיע',
   'Not Attending': 'לא מגיע',
 };
@@ -165,36 +165,36 @@ export default function RSVP({ theme }: RSVPProps) {
       </div>
       <div className="relative mx-auto flex min-h-[calc(100vh-4rem)] w-full max-w-2xl items-center justify-center">
         <div
-          className={`w-full animate-fade-in animate-float rounded-3xl border p-6 shadow-2xl backdrop-blur-xl sm:p-10 ${selectedTheme.card}`}
+          className={`w-full animate-fade-in animate-float rounded-3xl border p-8 shadow-2xl backdrop-blur-xl sm:p-12 ${selectedTheme.card} text-base sm:text-lg`}
         >
-          <h2 className="animate-slide-up text-3xl tracking-wide text-wedding-charcoal sm:text-4xl">
+          <h2 className="animate-slide-up text-4xl font-semibold tracking-wide text-wedding-charcoal sm:text-5xl lg:text-6xl">
             נשמח לראותכם
           </h2>
-          <p className="mt-3 animate-slide-up font-sans text-sm text-slate-600 sm:text-base">
+          <p className="mt-4 animate-slide-up font-sans text-lg text-slate-600 sm:text-xl">
             אישור הגעה דרך הזמנה אישית
           </p>
 
-          <div className="mt-6 animate-slide-up">
-            {loading && <p className="text-sm text-slate-600">טוען הזמנה אישית...</p>}
+          <div className="mt-8 animate-slide-up">
+            {loading && <p className="text-lg text-slate-600 sm:text-xl">טוען הזמנה אישית...</p>}
             {!loading && !hasDirectInvitation && (
-              <p className="text-sm text-rose-700">
+              <p className="text-lg text-rose-800 sm:text-xl">
                 לא נמצאו פרטי הזמנה בקישור. יש להיכנס דרך קישור ההזמנה שקיבלתם בוואטסאפ.
               </p>
             )}
           </div>
 
           {selectedGuest && (
-            <form className="mt-8 animate-slide-up space-y-5 border-t border-wedding-gold/20 pt-6" onSubmit={submitRsvp}>
-              <p className="text-sm text-slate-700">
+            <form className="mt-10 animate-slide-up space-y-6 border-t border-wedding-gold/20 pt-8" onSubmit={submitRsvp}>
+              <p className="text-lg text-slate-700 sm:text-xl">
                 שלום <span className="font-semibold text-wedding-charcoal">{selectedGuest.name}</span>, נא לעדכן את פרטי ההגעה:
               </p>
 
               <div>
-                <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="status">
+                <label className="mb-2 block text-lg font-medium text-slate-700 sm:text-xl" htmlFor="status">
                   סטטוס הגעה
                 </label>
                 <select
-                  className="w-full rounded-xl border border-slate-200/90 bg-white/80 px-4 py-3 text-sm text-slate-700 transition-all duration-300 focus:border-wedding-gold focus:outline-none focus:ring-1 focus:ring-wedding-gold"
+                  className="w-full rounded-xl border border-slate-200/90 bg-white/80 px-4 py-4 text-lg text-slate-800 transition-all duration-300 focus:border-wedding-gold focus:outline-none focus:ring-2 focus:ring-wedding-gold sm:text-xl"
                   id="status"
                   onChange={(e) => setStatus(e.target.value as GuestStatus)}
                   value={status}
@@ -206,11 +206,11 @@ export default function RSVP({ theme }: RSVPProps) {
               </div>
 
               <div>
-                <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="party-size">
+                <label className="mb-2 block text-lg font-medium text-slate-700 sm:text-xl" htmlFor="party-size">
                   כמות אורחים
                 </label>
                 <input
-                  className="w-full rounded-xl border border-slate-200/90 bg-white/80 px-4 py-3 text-sm text-slate-700 transition-all duration-300 focus:border-wedding-gold focus:outline-none focus:ring-1 focus:ring-wedding-gold"
+                  className="w-full rounded-xl border border-slate-200/90 bg-white/80 px-4 py-4 text-lg text-slate-800 transition-all duration-300 focus:border-wedding-gold focus:outline-none focus:ring-2 focus:ring-wedding-gold sm:text-xl"
                   id="party-size"
                   min={1}
                   onChange={(e) => setPartySize(e.target.value)}
@@ -220,7 +220,7 @@ export default function RSVP({ theme }: RSVPProps) {
               </div>
 
               <button
-                className={`w-full transform rounded-xl px-4 py-3 text-sm font-semibold transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg disabled:cursor-not-allowed ${selectedTheme.buttonSecondary}`}
+                className={`w-full transform rounded-xl px-4 py-4 text-lg font-semibold transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg disabled:cursor-not-allowed sm:text-xl ${selectedTheme.buttonSecondary}`}
                 disabled={saving}
                 type="submit"
               >
@@ -229,8 +229,8 @@ export default function RSVP({ theme }: RSVPProps) {
             </form>
           )}
 
-          {error && <p className="mt-5 text-sm text-rose-700">{error}</p>}
-          {confirmation && <p className="mt-5 text-sm text-emerald-700">{confirmation}</p>}
+          {error && <p className="mt-6 text-lg text-rose-800 sm:text-xl">{error}</p>}
+          {confirmation && <p className="mt-6 text-lg text-emerald-800 sm:text-xl">{confirmation}</p>}
         </div>
       </div>
     </section>
