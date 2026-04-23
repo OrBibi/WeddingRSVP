@@ -18,6 +18,7 @@ import {
   importGuestsToWedding,
   updateGuestInWedding,
 } from './firestoreService';
+import { normalizePhoneForComparison, formatPhoneForWhatsApp } from './phoneUtils';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -163,32 +164,6 @@ const isValidStatusFilter = (value: unknown): value is StatusFilter =>
 const isValidMessageSentFilter = (value: unknown): value is MessageSentFilter =>
   value === 'All' || value === 'Sent' || value === 'Not Sent';
 
-const normalizePhoneForComparison = (phone: string): string => {
-  const digitsOnly = phone.replace(/\D/g, '');
-  if (digitsOnly.startsWith('972')) {
-    return `0${digitsOnly.slice(3)}`;
-  }
-  if (digitsOnly.length === 9) {
-    return `0${digitsOnly}`;
-  }
-  return digitsOnly;
-};
-
-const formatPhoneForWhatsApp = (phone: string): string => {
-  const trimmed = phone.trim();
-  if (trimmed.startsWith('+')) {
-    return `${trimmed.replace(/\D/g, '')}@c.us`;
-  }
-
-  const digitsOnly = trimmed.replace(/\D/g, '');
-  if (digitsOnly.startsWith('972')) {
-    return `${digitsOnly}@c.us`;
-  }
-
-  const withoutLeadingZero = digitsOnly.startsWith('0') ? digitsOnly.slice(1) : digitsOnly;
-  return `972${withoutLeadingZero}@c.us`;
-};
-
 const filterGuestsByStatus = (guests: Guest[], statusFilter: StatusFilter) => {
   if (statusFilter === 'All') {
     return guests;
@@ -231,6 +206,17 @@ const emitProgressEvent = (sessionId: string, event: ProgressEvent, payload: unk
   stream.write(`data: ${JSON.stringify(payload)}\n\n`);
 };
 
+/** WhatsApp has no HTML-style hyperlinks; the URL stays visible. This block adds a clear Hebrew line above it. */
+const RSVP_LINK_HERE_PLACEHOLDER = '{{link_here}}';
+
+const buildWhatsAppGuestMessage = (messageTemplate: string, guestName: string, singleGuestLink: string): string => {
+  const linkHereBlock = `לחץ כאן\n\u200E${singleGuestLink}`;
+  return messageTemplate
+    .replaceAll('{{name}}', guestName)
+    .replaceAll(RSVP_LINK_HERE_PLACEHOLDER, linkHereBlock)
+    .replaceAll('{{link}}', singleGuestLink);
+};
+
 const sendWhatsAppBatch = async (
   client: Client,
   weddingId: string,
@@ -257,16 +243,14 @@ const sendWhatsAppBatch = async (
   for (const [index, guest] of guestsToNotify.entries()) {
     const token = (await ensureGuestRsvpToken(weddingId, guest.id)) ?? '';
     const singleGuestLink = `${rsvpLink.replace(/\/$/, '')}/rsvp/${weddingId}/${guest.id}?token=${token}`;
-    const text = messageTemplate
-      .replaceAll('{{name}}', guest.name)
-      .replaceAll('{{link}}', singleGuestLink);
+    const text = buildWhatsAppGuestMessage(messageTemplate, guest.name, singleGuestLink);
     const formattedPhone = formatPhoneForWhatsApp(guest.phoneNumber);
 
     try {
       if (messageMedia) {
-        await client.sendMessage(formattedPhone, messageMedia, { caption: text });
+        await client.sendMessage(formattedPhone, messageMedia, { caption: text, linkPreview: true });
       } else {
-        await client.sendMessage(formattedPhone, text);
+        await client.sendMessage(formattedPhone, text, { linkPreview: true });
       }
       await updateGuestInWedding(weddingId, guest.id, {
         messageSent: true,
@@ -636,6 +620,12 @@ app.post('/api/notifications/whatsapp', async (req, res) => {
   ) {
     return res.status(400).json({
       message: 'messageTemplate, rsvpLink, valid statusFilter, and valid messageSentFilter are required.',
+    });
+  }
+  const trimmedTemplate = messageTemplate.trim();
+  if (!trimmedTemplate.includes('{{link}}') && !trimmedTemplate.includes(RSVP_LINK_HERE_PLACEHOLDER)) {
+    return res.status(400).json({
+      message: 'messageTemplate must include {{link}} or {{link_here}} so each guest gets their personal RSVP URL.',
     });
   }
   if (media && typeof media.dataUrl !== 'string') {

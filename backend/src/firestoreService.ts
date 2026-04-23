@@ -1,20 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { Guest, GuestGroup, GuestStatus } from '../../shared/types';
 import { firestore } from './firebaseAdmin';
+import { normalizePhoneForComparison } from './phoneUtils';
 
 const usersCollection = firestore.collection('users');
 const weddingsCollection = firestore.collection('weddings');
-
-const normalizePhoneForComparison = (phone: string): string => {
-  const digitsOnly = phone.replace(/\D/g, '');
-  if (digitsOnly.startsWith('972')) {
-    return `0${digitsOnly.slice(3)}`;
-  }
-  if (digitsOnly.length === 9) {
-    return `0${digitsOnly}`;
-  }
-  return digitsOnly;
-};
 
 export const ensureUserWedding = async (uid: string, email?: string) => {
   const userRef = usersCollection.doc(uid);
