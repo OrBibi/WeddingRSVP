@@ -3,24 +3,23 @@ import type { Guest } from '../../shared/types';
 const guests: Guest[] = [
   {
     id: 'g-001',
-    name: 'ישראל ישראלי',
-    phoneNumber: '0501111111',
+    weddingId: 'legacy',
+    name: 'אור ביבי',
+    phoneNumber: '0584455881',
     status: 'Pending',
-    partySize: 2,
+    expectedPartySize: 1,
+    partySize: 1,
+    groupIds: [],
   },
   {
     id: 'g-002',
-    name: 'נועה כהן',
-    phoneNumber: '0502222222',
+    weddingId: 'legacy',
+    name: 'קרן אור',
+    phoneNumber: '0526911704',
     status: 'Attending',
-    partySize: 3,
-  },
-  {
-    id: 'g-003',
-    name: 'דניאל לוי',
-    phoneNumber: '0503333333',
-    status: 'Not Attending',
+    expectedPartySize: 1,
     partySize: 1,
+    groupIds: [],
   },
 ];
 
@@ -52,3 +51,40 @@ export const updateGuestByPhone = (
 
 export const getPendingGuests = (): Guest[] =>
   guests.filter((guest) => guest.status === 'Pending');
+
+export const deleteGuestByPhone = (phoneNumber: string): Guest | null => {
+  const index = guests.findIndex((guest) => guest.phoneNumber === phoneNumber);
+  if (index === -1) {
+    return null;
+  }
+  const [deletedGuest] = guests.splice(index, 1);
+  return deletedGuest;
+};
+
+export const updateGuestDetailsByPhone = (
+  phoneNumber: string,
+  updates: Partial<Pick<Guest, 'name' | 'phoneNumber' | 'expectedPartySize' | 'status' | 'partySize'>>
+): Guest | null => {
+  const guest = guests.find((entry) => entry.phoneNumber === phoneNumber);
+  if (!guest) {
+    return null;
+  }
+
+  if (typeof updates.name === 'string') {
+    guest.name = updates.name;
+  }
+  if (typeof updates.phoneNumber === 'string') {
+    guest.phoneNumber = updates.phoneNumber;
+  }
+  if (typeof updates.expectedPartySize === 'number') {
+    guest.expectedPartySize = updates.expectedPartySize;
+  }
+  if (updates.status) {
+    guest.status = updates.status;
+  }
+  if (typeof updates.partySize === 'number') {
+    guest.partySize = updates.partySize;
+  }
+
+  return guest;
+};

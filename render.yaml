@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: rsvp-backend
+    env: node
+    rootDir: ./backend
+    buildCommand: npm install
+    startCommand: npm start
+
+  - type: static_site
+    name: rsvp-frontend
+    env: static
+    rootDir: ./frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    envVars:
+      - key: VITE_API_URL
+        value: https://rsvp-backend.onrender.com/api
