@@ -7,11 +7,28 @@ export type RSVPTheme = 'floral' | 'ocean' | 'classic';
 
 function App() {
   const isPublicRsvpRoute = useMemo(() => /^\/rsvp\/[^/]+\/[^/]+/.test(window.location.pathname), []);
+  const isRsvpOnlyMode = import.meta.env.VITE_RSVP_ONLY === 'true';
   const [view, setView] = useState<View>('dashboard');
   const [rsvpTheme, setRsvpTheme] = useState<RSVPTheme>('floral');
 
   if (isPublicRsvpRoute) {
     return <RSVP theme={rsvpTheme} />;
+  }
+
+  if (isRsvpOnlyMode) {
+    return (
+      <main className="min-h-screen bg-gradient-to-b from-[#f9f7f2] via-[#f7f2ea] to-[#f3ece1] px-4 py-6 sm:px-8">
+        <div className="mx-auto max-w-2xl rounded-3xl border border-wedding-gold/25 bg-white/90 p-8 text-center shadow-xl">
+          <h1 className="text-2xl font-semibold text-wedding-charcoal">עמוד פרטי</h1>
+          <p className="mt-3 text-sm text-slate-600 sm:text-base">
+            מערכת ניהול המוזמנים זמינה רק באופן מקומי.
+          </p>
+          <p className="mt-2 text-sm text-slate-600 sm:text-base">
+            לאישור הגעה יש להיכנס דרך קישור ההזמנה האישי שנשלח בוואטסאפ.
+          </p>
+        </div>
+      </main>
+    );
   }
 
   return (
