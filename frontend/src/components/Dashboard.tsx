@@ -790,7 +790,7 @@ export default function Dashboard() {
           <p className="mt-1 text-2xl font-semibold text-rose-800">{declinedInvitations}</p>
         </div>
         <div className="rounded-2xl border border-wedding-gold/30 bg-white/90 px-4 py-3 shadow-sm backdrop-blur-sm">
-          <p className="text-xs tracking-wider text-wedding-gold">עוד לא עודכנו</p>
+          <p className="text-xs tracking-wider text-wedding-gold">עוד לא עידכנו</p>
           <p className="mt-1 text-2xl font-semibold text-amber-900">{pendingInvitations}</p>
         </div>
       </div>
