@@ -85,7 +85,7 @@ export default function RSVP({ theme }: RSVPProps) {
         groupIds: [],
       });
       setStatus(invitation.status);
-      setPartySize(invitation.partySize > 0 ? String(invitation.partySize) : '');
+      setPartySize('');
     } catch {
       setError('לא ניתן לטעון את ההזמנה האישית. בדקו שהקישור תקין.');
     } finally {
