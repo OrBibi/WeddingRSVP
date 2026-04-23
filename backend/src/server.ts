@@ -1,6 +1,5 @@
 import cors from 'cors';
 import express from 'express';
-import type { NextFunction, Request, Response } from 'express';
 import type { Guest, GuestStatus } from '../../shared/types';
 import QRCode from 'qrcode';
 import { Client, LocalAuth, MessageMedia } from 'whatsapp-web.js';
@@ -11,7 +10,6 @@ import {
   deleteGuestInWedding,
   deleteGroupInWedding,
   ensureGuestRsvpToken,
-  ensureUserWedding,
   findGuestById,
   findGuestByPhone,
   getGuestsByWeddingId,
@@ -19,12 +17,12 @@ import {
   importGuestsToWedding,
   updateGuestInWedding,
 } from './firestoreService';
-import { firebaseAdminAuth } from './firebaseAdmin';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const WA_DELAY_MIN_MS = Number(process.env.WA_DELAY_MIN_MS ?? 2000);
 const WA_DELAY_MAX_MS = Number(process.env.WA_DELAY_MAX_MS ?? 7000);
+const DEFAULT_WEDDING_ID = process.env.DEFAULT_WEDDING_ID?.trim() || 'default-wedding';
 
 app.use(cors());
 app.use(express.json({ limit: '15mb' }));
@@ -145,7 +143,6 @@ const disconnectWhatsAppSession = async (uid: string) => {
 
 const statuses: GuestStatus[] = ['Pending', 'Attending', 'Not Attending'];
 type StatusFilter = 'All' | GuestStatus;
-type AuthenticatedRequest = Request & { user: { uid: string; email?: string } };
 
 const isValidStatus = (value: unknown): value is GuestStatus =>
   typeof value === 'string' && statuses.includes(value as GuestStatus);
@@ -241,58 +238,34 @@ const sendWhatsAppBatch = async (
   return { sentCount, failedCount };
 };
 
-const requireAuth = async (req: Request, res: Response, next: NextFunction) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith('Bearer ')) {
-    return res.status(401).json({ message: 'Missing authorization token.' });
-  }
-
-  const idToken = authHeader.slice('Bearer '.length);
-  try {
-    const decoded = await firebaseAdminAuth.verifyIdToken(idToken);
-    (req as AuthenticatedRequest).user = {
-      uid: decoded.uid,
-      email: decoded.email,
-    };
-    await ensureUserWedding(decoded.uid, decoded.email);
-    return next();
-  } catch {
-    return res.status(401).json({ message: 'Invalid authorization token.' });
-  }
-};
-
-app.post('/api/auth/bootstrap', requireAuth, async (req, res) => {
-  const authReq = req as AuthenticatedRequest;
+app.post('/api/auth/bootstrap', async (_req, res) => {
   return res.json({
-    message: 'Authenticated successfully.',
+    message: 'Single-user mode is active.',
     user: {
-      uid: authReq.user.uid,
-      email: authReq.user.email ?? null,
-      weddingId: authReq.user.uid,
+      uid: DEFAULT_WEDDING_ID,
+      email: null,
+      weddingId: DEFAULT_WEDDING_ID,
     },
   });
 });
 
-app.get('/api/guests', requireAuth, async (req, res) => {
-  const authReq = req as AuthenticatedRequest;
-  const guests = await getGuestsByWeddingId(authReq.user.uid);
+app.get('/api/guests', async (_req, res) => {
+  const guests = await getGuestsByWeddingId(DEFAULT_WEDDING_ID);
   return res.json(guests);
 });
 
-app.get('/api/groups', requireAuth, async (req, res) => {
-  const authReq = req as AuthenticatedRequest;
-  const groups = await getGroupsByWeddingId(authReq.user.uid);
+app.get('/api/groups', async (_req, res) => {
+  const groups = await getGroupsByWeddingId(DEFAULT_WEDDING_ID);
   return res.json(groups);
 });
 
-app.post('/api/groups', requireAuth, async (req, res) => {
-  const authReq = req as AuthenticatedRequest;
+app.post('/api/groups', async (req, res) => {
   const { name } = req.body as { name?: string };
   if (!name?.trim()) {
     return res.status(400).json({ message: 'name is required.' });
   }
 
-  const existingGroups = await getGroupsByWeddingId(authReq.user.uid);
+  const existingGroups = await getGroupsByWeddingId(DEFAULT_WEDDING_ID);
   const hasDuplicate = existingGroups.some(
     (group) => group.name.trim().toLowerCase() === name.trim().toLowerCase()
   );
@@ -300,28 +273,27 @@ app.post('/api/groups', requireAuth, async (req, res) => {
     return res.status(409).json({ message: 'Group name already exists.' });
   }
 
-  const group = await createGroupInWedding(authReq.user.uid, name.trim());
+  const group = await createGroupInWedding(DEFAULT_WEDDING_ID, name.trim());
   return res.status(201).json(group);
 });
 
-app.delete('/api/groups/:id', requireAuth, async (req, res) => {
-  const authReq = req as AuthenticatedRequest;
+app.delete('/api/groups/:id', async (req, res) => {
   const id = String(req.params.id ?? '');
   if (!id) {
     return res.status(400).json({ message: 'id is required.' });
   }
 
-  const deleted = await deleteGroupInWedding(authReq.user.uid, id);
+  const deleted = await deleteGroupInWedding(DEFAULT_WEDDING_ID, id);
   if (!deleted) {
     return res.status(404).json({ message: 'Group not found.' });
   }
 
-  const guests = await getGuestsByWeddingId(authReq.user.uid);
+  const guests = await getGuestsByWeddingId(DEFAULT_WEDDING_ID);
   await Promise.all(
     guests
       .filter((guest) => guest.groupIds.includes(id))
       .map((guest) =>
-        updateGuestInWedding(authReq.user.uid, guest.id, {
+        updateGuestInWedding(DEFAULT_WEDDING_ID, guest.id, {
           groupIds: guest.groupIds.filter((groupId) => groupId !== id),
         })
       )
@@ -330,8 +302,7 @@ app.delete('/api/groups/:id', requireAuth, async (req, res) => {
   return res.json({ message: 'Group deleted successfully.' });
 });
 
-app.post('/api/guests', requireAuth, async (req, res) => {
-  const authReq = req as AuthenticatedRequest;
+app.post('/api/guests', async (req, res) => {
   const { name, phoneNumber, partySize } = req.body as Partial<Guest>;
   if (!name || !phoneNumber || typeof partySize !== 'number') {
     return res
@@ -340,7 +311,7 @@ app.post('/api/guests', requireAuth, async (req, res) => {
   }
 
   const normalizedPhone = normalizePhoneForComparison(phoneNumber);
-  const allGuests = await getGuestsByWeddingId(authReq.user.uid);
+  const allGuests = await getGuestsByWeddingId(DEFAULT_WEDDING_ID);
   const existing = allGuests.find(
     (guest) => normalizePhoneForComparison(guest.phoneNumber) === normalizedPhone
   );
@@ -348,7 +319,7 @@ app.post('/api/guests', requireAuth, async (req, res) => {
     return res.status(409).json({ message: 'Phone number must be unique.' });
   }
 
-  const guest = await addGuestToWedding(authReq.user.uid, {
+  const guest = await addGuestToWedding(DEFAULT_WEDDING_ID, {
     name: name.trim(),
     phoneNumber: phoneNumber.trim(),
     expectedPartySize: partySize,
@@ -356,8 +327,7 @@ app.post('/api/guests', requireAuth, async (req, res) => {
   return res.status(201).json(guest);
 });
 
-app.post('/api/guests/import', requireAuth, async (req, res) => {
-  const authReq = req as AuthenticatedRequest;
+app.post('/api/guests/import', async (req, res) => {
   const { guests: rawGuests } = req.body as {
     guests?: Array<{
       name?: string;
@@ -423,7 +393,10 @@ app.post('/api/guests/import', requireAuth, async (req, res) => {
   const deduplicatedRows = [...uniqueByPhone.values()];
   const skippedInvalidRows = rawGuests.length - deduplicatedRows.length;
 
-  const { createdGuests, skippedCount } = await importGuestsToWedding(authReq.user.uid, deduplicatedRows);
+  const { createdGuests, skippedCount } = await importGuestsToWedding(
+    DEFAULT_WEDDING_ID,
+    deduplicatedRows
+  );
 
   return res.json({
     message: 'Guests imported successfully.',
@@ -433,8 +406,7 @@ app.post('/api/guests/import', requireAuth, async (req, res) => {
   });
 });
 
-app.post('/api/guests/bulk-groups', requireAuth, async (req, res) => {
-  const authReq = req as AuthenticatedRequest;
+app.post('/api/guests/bulk-groups', async (req, res) => {
   const { guestIds, groupId, action } = req.body as {
     guestIds?: string[];
     groupId?: string;
@@ -448,33 +420,32 @@ app.post('/api/guests/bulk-groups', requireAuth, async (req, res) => {
     return res.status(400).json({ message: 'action must be add or remove.' });
   }
 
-  const groups = await getGroupsByWeddingId(authReq.user.uid);
+  const groups = await getGroupsByWeddingId(DEFAULT_WEDDING_ID);
   const groupExists = groups.some((group) => group.id === groupId);
   if (!groupExists) {
     return res.status(404).json({ message: 'Group not found.' });
   }
 
-  const result = await bulkUpdateGuestGroups(authReq.user.uid, guestIds, groupId, action);
+  const result = await bulkUpdateGuestGroups(DEFAULT_WEDDING_ID, guestIds, groupId, action);
   return res.json({
     message: 'Guest groups updated successfully.',
     updatedCount: result.updatedCount,
   });
 });
 
-app.delete('/api/guests/:phoneNumber', requireAuth, async (req, res) => {
-  const authReq = req as AuthenticatedRequest;
+app.delete('/api/guests/:phoneNumber', async (req, res) => {
   const { phoneNumber } = req.params;
   if (!phoneNumber) {
     return res.status(400).json({ message: 'phoneNumber is required.' });
   }
 
   try {
-    const guests = await getGuestsByWeddingId(authReq.user.uid);
+    const guests = await getGuestsByWeddingId(DEFAULT_WEDDING_ID);
     const existing = guests.find((guest) => guest.phoneNumber === phoneNumber);
     if (!existing) {
       return res.status(404).json({ message: 'Guest not found for that phone number.' });
     }
-    const deleted = await deleteGuestInWedding(authReq.user.uid, existing.id);
+    const deleted = await deleteGuestInWedding(DEFAULT_WEDDING_ID, existing.id);
     if (!deleted) {
       return res.status(404).json({ message: 'Guest not found for that phone number.' });
     }
@@ -484,8 +455,7 @@ app.delete('/api/guests/:phoneNumber', requireAuth, async (req, res) => {
   }
 });
 
-app.put('/api/guests/:phoneNumber', requireAuth, async (req, res) => {
-  const authReq = req as AuthenticatedRequest;
+app.put('/api/guests/:phoneNumber', async (req, res) => {
   const { phoneNumber } = req.params;
   const { name, newPhoneNumber, expectedPartySize, status, partySize, groupIds } = req.body as {
     name?: string;
@@ -496,7 +466,7 @@ app.put('/api/guests/:phoneNumber', requireAuth, async (req, res) => {
     groupIds?: string[];
   };
 
-  const allGuests = await getGuestsByWeddingId(authReq.user.uid);
+  const allGuests = await getGuestsByWeddingId(DEFAULT_WEDDING_ID);
   const currentGuest = allGuests.find((guest) => guest.phoneNumber === phoneNumber);
   if (!currentGuest) {
     return res.status(404).json({ message: 'Guest not found for that phone number.' });
@@ -530,7 +500,7 @@ app.put('/api/guests/:phoneNumber', requireAuth, async (req, res) => {
     }
   }
 
-  const updated = await updateGuestInWedding(authReq.user.uid, currentGuest.id, {
+  const updated = await updateGuestInWedding(DEFAULT_WEDDING_ID, currentGuest.id, {
     name: typeof name === 'string' ? name.trim() : undefined,
     phoneNumber: typeof newPhoneNumber === 'string' ? newPhoneNumber.trim() : undefined,
     expectedPartySize,
@@ -546,9 +516,8 @@ app.put('/api/guests/:phoneNumber', requireAuth, async (req, res) => {
   return res.json(updated as Guest);
 });
 
-app.post('/api/notifications/trigger', requireAuth, async (req, res) => {
-  const authReq = req as AuthenticatedRequest;
-  const guests = await getGuestsByWeddingId(authReq.user.uid);
+app.post('/api/notifications/trigger', async (_req, res) => {
+  const guests = await getGuestsByWeddingId(DEFAULT_WEDDING_ID);
   const pendingGuests = guests.filter((guest) => guest.status === 'Pending');
 
   pendingGuests.forEach((guest) => {
@@ -563,8 +532,7 @@ app.post('/api/notifications/trigger', requireAuth, async (req, res) => {
   });
 });
 
-app.post('/api/notifications/whatsapp', requireAuth, async (req, res) => {
-  const authReq = req as AuthenticatedRequest;
+app.post('/api/notifications/whatsapp', async (req, res) => {
   const { messageTemplate, statusFilter, rsvpLink, media, groupId } = req.body as {
     messageTemplate?: string;
     statusFilter?: StatusFilter;
@@ -573,7 +541,7 @@ app.post('/api/notifications/whatsapp', requireAuth, async (req, res) => {
     groupId?: string;
   };
 
-  const whatsappSession = getOrCreateWhatsAppSession(authReq.user.uid);
+  const whatsappSession = getOrCreateWhatsAppSession(DEFAULT_WEDDING_ID);
   if (!whatsappSession.isReady) {
     return res.status(503).json({
       message: 'WhatsApp client is not ready for this user. Please scan your personal QR first.',
@@ -595,7 +563,7 @@ app.post('/api/notifications/whatsapp', requireAuth, async (req, res) => {
       ? { dataUrl: media.dataUrl, fileName: media.fileName }
       : null;
 
-  const weddingId = authReq.user.uid;
+  const weddingId = DEFAULT_WEDDING_ID;
   const allGuests = await getGuestsByWeddingId(weddingId);
   const statusFiltered = filterGuestsByStatus(allGuests, statusFilter);
   const guestsToNotify = filterGuestsByGroup(statusFiltered, groupId);
@@ -628,9 +596,8 @@ app.post('/api/notifications/whatsapp', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/notifications/whatsapp/disconnect', requireAuth, async (req, res) => {
-  const authReq = req as AuthenticatedRequest;
-  const disconnected = await disconnectWhatsAppSession(authReq.user.uid);
+app.post('/api/notifications/whatsapp/disconnect', async (_req, res) => {
+  const disconnected = await disconnectWhatsAppSession(DEFAULT_WEDDING_ID);
   return res.json({
     message: disconnected
       ? 'WhatsApp client disconnected successfully.'
@@ -682,8 +649,7 @@ app.put('/api/public/rsvp/:weddingId/:guestId', async (req, res) => {
   return res.json(updated);
 });
 
-app.put('/api/rsvp', requireAuth, async (req, res) => {
-  const authReq = req as AuthenticatedRequest;
+app.put('/api/rsvp', async (req, res) => {
   const { phoneNumber, status, partySize } = req.body as {
     phoneNumber?: string;
     status?: GuestStatus;
@@ -693,20 +659,19 @@ app.put('/api/rsvp', requireAuth, async (req, res) => {
     return res.status(400).json({ message: 'phoneNumber, status, and partySize are required.' });
   }
 
-  const guest = await findGuestByPhone(authReq.user.uid, phoneNumber.trim());
+  const guest = await findGuestByPhone(DEFAULT_WEDDING_ID, phoneNumber.trim());
   if (!guest) {
     return res.status(404).json({ message: 'Guest not found for that phone number.' });
   }
-  const updated = await updateGuestInWedding(authReq.user.uid, guest.id, {
+  const updated = await updateGuestInWedding(DEFAULT_WEDDING_ID, guest.id, {
     status,
     partySize,
   });
   return res.json(updated);
 });
 
-app.get('/api/notifications/whatsapp/status', requireAuth, async (req, res) => {
-  const authReq = req as AuthenticatedRequest;
-  const whatsappSession = getOrCreateWhatsAppSession(authReq.user.uid);
+app.get('/api/notifications/whatsapp/status', async (_req, res) => {
+  const whatsappSession = getOrCreateWhatsAppSession(DEFAULT_WEDDING_ID);
 
   if (whatsappSession.isReady) {
     return res.json({
