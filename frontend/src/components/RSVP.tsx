@@ -57,7 +57,7 @@ export default function RSVP({ theme }: RSVPProps) {
 
   const [selectedGuest, setSelectedGuest] = useState<Guest | null>(null);
   const [status, setStatus] = useState<GuestStatus>('Pending');
-  const [partySize, setPartySize] = useState(1);
+  const [partySize, setPartySize] = useState('');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -85,7 +85,7 @@ export default function RSVP({ theme }: RSVPProps) {
         groupIds: [],
       });
       setStatus(invitation.status);
-      setPartySize(Math.max(1, invitation.partySize || 1));
+      setPartySize(invitation.partySize > 0 ? String(invitation.partySize) : '');
     } catch {
       setError('לא ניתן לטעון את ההזמנה האישית. בדקו שהקישור תקין.');
     } finally {
@@ -113,12 +113,24 @@ export default function RSVP({ theme }: RSVPProps) {
       if (!weddingIdFromPath || !guestIdFromPath || !tokenFromQuery) {
         throw new Error('Missing invitation details.');
       }
+      const trimmedPartySize = partySize.trim();
+      if (status === 'Attending') {
+        const parsedForAttending = Number(trimmedPartySize);
+        if (!trimmedPartySize || !Number.isFinite(parsedForAttending) || parsedForAttending <= 0) {
+          setError('כדי לאשר הגעה צריך להזין מספר אורחים גדול מ-0.');
+          return;
+        }
+      }
+      const parsedPartySize = Number(trimmedPartySize);
+      const normalizedPartySize =
+        Number.isFinite(parsedPartySize) && parsedPartySize > 0 ? Math.floor(parsedPartySize) : 1;
       const updated = await submitPublicRsvp(weddingIdFromPath, guestIdFromPath, {
         token: tokenFromQuery,
         status,
-        partySize,
+        partySize: normalizedPartySize,
       });
       setSelectedGuest(updated);
+      setPartySize(String(updated.partySize ?? ''));
       setConfirmation('תודה! אישור ההגעה התקבל.');
     } catch {
       setError('לא ניתן לעדכן את אישור ההגעה. נסו שוב.');
@@ -184,8 +196,7 @@ export default function RSVP({ theme }: RSVPProps) {
                   className="w-full rounded-xl border border-slate-200/90 bg-white/80 px-4 py-3 text-sm text-slate-700 transition-all duration-300 focus:border-wedding-gold focus:outline-none focus:ring-1 focus:ring-wedding-gold"
                   id="party-size"
                   min={1}
-                  onChange={(e) => setPartySize(Number(e.target.value))}
-                  required
+                  onChange={(e) => setPartySize(e.target.value)}
                   type="number"
                   value={partySize}
                 />
