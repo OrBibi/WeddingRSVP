@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import type { Guest, GuestGroup, GuestStatus } from '../../shared/types';
 import { firestore } from './firebaseAdmin';
 import { normalizePhoneForComparison } from './phoneUtils';
@@ -33,6 +33,14 @@ export const ensureUserWedding = async (uid: string, email?: string) => {
 
 const guestsCollection = (weddingId: string) => weddingsCollection.doc(weddingId).collection('guests');
 const groupsCollection = (weddingId: string) => weddingsCollection.doc(weddingId).collection('groups');
+
+const RSVP_SLUG_RE = /^[A-Za-z0-9_-]{6,22}$/;
+
+const newRsvpSlugCandidate = (): string =>
+  randomBytes(6)
+    .toString('base64url')
+    .replace(/=/g, '')
+    .slice(0, 10);
 
 export const getGuestsByWeddingId = async (weddingId: string): Promise<Guest[]> => {
   const snapshot = await guestsCollection(weddingId).get();
@@ -90,7 +98,8 @@ export const addGuestToWedding = async (
     messageSent: false,
   };
   await guestsCollection(weddingId).doc(id).set(guest);
-  return guest;
+  const slug = await ensureGuestRsvpSlug(weddingId, id);
+  return slug ? { ...guest, rsvpSlug: slug } : guest;
 };
 
 export const updateGuestInWedding = async (
@@ -192,6 +201,49 @@ export const ensureGuestRsvpToken = async (weddingId: string, guestId: string): 
   return newToken;
 };
 
+export const ensureGuestRsvpSlug = async (weddingId: string, guestId: string): Promise<string | null> => {
+  const guestRef = guestsCollection(weddingId).doc(guestId);
+  const existing = await guestRef.get();
+  if (!existing.exists) {
+    return null;
+  }
+
+  const guest = existing.data() as Guest;
+  if (typeof guest.rsvpSlug === 'string' && RSVP_SLUG_RE.test(guest.rsvpSlug)) {
+    return guest.rsvpSlug;
+  }
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const slug = newRsvpSlugCandidate();
+    const conflict = await guestsCollection(weddingId).where('rsvpSlug', '==', slug).limit(1).get();
+    if (conflict.empty) {
+      await guestRef.update({ rsvpSlug: slug });
+      return slug;
+    }
+    if (conflict.docs[0]?.id === guestId) {
+      return slug;
+    }
+  }
+  return null;
+};
+
+export const findGuestByRsvpSlug = async (weddingId: string, slug: string): Promise<Guest | null> => {
+  if (!RSVP_SLUG_RE.test(slug)) {
+    return null;
+  }
+  const snap = await guestsCollection(weddingId).where('rsvpSlug', '==', slug).limit(1).get();
+  if (snap.empty) {
+    return null;
+  }
+  const data = snap.docs[0].data() as Guest;
+  return {
+    ...data,
+    groupIds: Array.isArray(data.groupIds) ? data.groupIds : [],
+    messageSent: Boolean(data.messageSent),
+    lastMessageSentAt: typeof data.lastMessageSentAt === 'string' ? data.lastMessageSentAt : undefined,
+  };
+};
+
 export const importGuestsToWedding = async (
   weddingId: string,
   input: Array<{
@@ -229,8 +281,9 @@ export const importGuestsToWedding = async (
       messageSent: false,
     };
     await guestsCollection(weddingId).doc(guest.id).set(guest);
+    const slug = await ensureGuestRsvpSlug(weddingId, guest.id);
     existingPhones.add(normalizedPhone);
-    createdGuests.push(guest);
+    createdGuests.push(slug ? { ...guest, rsvpSlug: slug } : guest);
   }
 
   return {

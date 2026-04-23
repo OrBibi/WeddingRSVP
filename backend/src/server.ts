@@ -10,9 +10,11 @@ import {
   createGroupInWedding,
   deleteGuestInWedding,
   deleteGroupInWedding,
+  ensureGuestRsvpSlug,
   ensureGuestRsvpToken,
   findGuestById,
   findGuestByPhone,
+  findGuestByRsvpSlug,
   getGuestsByWeddingId,
   getGroupsByWeddingId,
   importGuestsToWedding,
@@ -25,6 +27,23 @@ const PORT = process.env.PORT || 3001;
 const WA_DELAY_MIN_MS = Number(process.env.WA_DELAY_MIN_MS ?? 2000);
 const WA_DELAY_MAX_MS = Number(process.env.WA_DELAY_MAX_MS ?? 7000);
 const DEFAULT_WEDDING_ID = process.env.DEFAULT_WEDDING_ID?.trim() || 'default-wedding';
+/** When not `false`, WhatsApp RSVP links use `/r/{weddingId}/{slug}` when a slug exists; otherwise the long `/rsvp/.../guestId` URL is used. */
+const RSVP_SHORT_LINKS_ENABLED = process.env.RSVP_SHORT_LINKS?.trim() !== 'false';
+
+const buildGuestRsvpUrl = (
+  baseNoTrailingSlash: string,
+  weddingId: string,
+  guestId: string,
+  token: string,
+  slug: string | null
+): string => {
+  const encWedding = encodeURIComponent(weddingId);
+  const encToken = encodeURIComponent(token);
+  if (RSVP_SHORT_LINKS_ENABLED && slug) {
+    return `${baseNoTrailingSlash}/r/${encWedding}/${encodeURIComponent(slug)}?token=${encToken}`;
+  }
+  return `${baseNoTrailingSlash}/rsvp/${encWedding}/${encodeURIComponent(guestId)}?token=${encToken}`;
+};
 
 app.use(cors());
 app.use(express.json({ limit: '15mb' }));
@@ -240,9 +259,11 @@ const sendWhatsAppBatch = async (
     messageMedia = new MessageMedia(mimetype, base64Data, media.fileName || 'attachment');
   }
 
+  const rsvpBase = rsvpLink.replace(/\/$/, '');
   for (const [index, guest] of guestsToNotify.entries()) {
     const token = (await ensureGuestRsvpToken(weddingId, guest.id)) ?? '';
-    const singleGuestLink = `${rsvpLink.replace(/\/$/, '')}/rsvp/${weddingId}/${guest.id}?token=${token}`;
+    const slug = RSVP_SHORT_LINKS_ENABLED ? await ensureGuestRsvpSlug(weddingId, guest.id) : null;
+    const singleGuestLink = buildGuestRsvpUrl(rsvpBase, weddingId, guest.id, token, slug);
     const text = buildWhatsAppGuestMessage(messageTemplate, guest.name, singleGuestLink);
     const formattedPhone = formatPhoneForWhatsApp(guest.phoneNumber);
 
@@ -718,6 +739,50 @@ app.post('/api/notifications/whatsapp/disconnect', async (_req, res) => {
       ? 'WhatsApp client disconnected successfully.'
       : 'No active WhatsApp session found.',
   });
+});
+
+app.get('/api/public/rsvp/:weddingId/s/:slug', async (req, res) => {
+  const { weddingId, slug } = req.params;
+  const token = String(req.query.token ?? '');
+  if (!weddingId || !slug || !token) {
+    return res.status(400).json({ message: 'weddingId, slug, and token are required.' });
+  }
+
+  const guest = await findGuestByRsvpSlug(weddingId, slug);
+  if (!guest || guest.rsvpToken !== token) {
+    return res.status(404).json({ message: 'Invitation not found.' });
+  }
+
+  return res.json({
+    id: guest.id,
+    weddingId: guest.weddingId,
+    name: guest.name,
+    status: guest.status,
+    partySize: guest.partySize,
+  });
+});
+
+app.put('/api/public/rsvp/:weddingId/s/:slug', async (req, res) => {
+  const { weddingId, slug } = req.params;
+  const { token, status, partySize } = req.body as {
+    token?: string;
+    status?: GuestStatus;
+    partySize?: number;
+  };
+  if (!weddingId || !slug || !token || !isValidStatus(status) || typeof partySize !== 'number') {
+    return res.status(400).json({ message: 'token, status, and partySize are required.' });
+  }
+
+  const guest = await findGuestByRsvpSlug(weddingId, slug);
+  if (!guest || guest.rsvpToken !== token) {
+    return res.status(404).json({ message: 'Invitation not found.' });
+  }
+
+  const updated = await updateGuestInWedding(weddingId, guest.id, {
+    status,
+    partySize,
+  });
+  return res.json(updated);
 });
 
 app.get('/api/public/rsvp/:weddingId/:guestId', async (req, res) => {

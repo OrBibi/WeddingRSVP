@@ -10,6 +10,8 @@ export interface Guest {
   partySize: number;
   groupIds: string[];
   rsvpToken?: string;
+  /** Short stable segment for compact RSVP URLs (/r/.../slug). */
+  rsvpSlug?: string;
   messageSent?: boolean;
   lastMessageSentAt?: string;
 }

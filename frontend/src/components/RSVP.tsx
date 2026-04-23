@@ -1,6 +1,11 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import type { Guest, GuestStatus } from '../../../shared/types';
-import { fetchPublicInvitation, submitPublicRsvp } from '../api';
+import {
+  fetchPublicInvitation,
+  fetchPublicInvitationBySlug,
+  submitPublicRsvp,
+  submitPublicRsvpBySlug,
+} from '../api';
 import type { RSVPTheme } from '../App';
 
 const statusLabelMap: Record<GuestStatus, string> = {
@@ -49,11 +54,15 @@ const themeClassMap: Record<
 };
 
 export default function RSVP({ theme }: RSVPProps) {
-  const pathMatch = window.location.pathname.match(/^\/rsvp\/([^/]+)\/([^/]+)$/);
-  const weddingIdFromPath = pathMatch?.[1] ?? null;
-  const guestIdFromPath = pathMatch?.[2] ?? null;
+  const longPathMatch = window.location.pathname.match(/^\/rsvp\/([^/]+)\/([^/]+)$/);
+  const shortPathMatch = window.location.pathname.match(/^\/r\/([^/]+)\/([^/]+)$/);
+  const weddingIdFromPath = longPathMatch?.[1] ?? shortPathMatch?.[1] ?? null;
+  const guestIdFromPath = longPathMatch?.[2] ?? null;
+  const slugFromPath = shortPathMatch?.[2] ?? null;
   const tokenFromQuery = new URLSearchParams(window.location.search).get('token');
-  const hasDirectInvitation = Boolean(weddingIdFromPath && guestIdFromPath && tokenFromQuery);
+  const hasDirectInvitation = Boolean(
+    weddingIdFromPath && tokenFromQuery && (guestIdFromPath || slugFromPath)
+  );
 
   const [selectedGuest, setSelectedGuest] = useState<Guest | null>(null);
   const [status, setStatus] = useState<GuestStatus>('Pending');
@@ -65,7 +74,7 @@ export default function RSVP({ theme }: RSVPProps) {
   const selectedTheme = themeClassMap[theme];
 
   const loadDirectInvitation = async () => {
-    if (!weddingIdFromPath || !guestIdFromPath || !tokenFromQuery) {
+    if (!weddingIdFromPath || !tokenFromQuery || (!guestIdFromPath && !slugFromPath)) {
       return;
     }
     setLoading(true);
@@ -73,7 +82,9 @@ export default function RSVP({ theme }: RSVPProps) {
     setConfirmation('');
     setSelectedGuest(null);
     try {
-      const invitation = await fetchPublicInvitation(weddingIdFromPath, guestIdFromPath, tokenFromQuery);
+      const invitation = slugFromPath
+        ? await fetchPublicInvitationBySlug(weddingIdFromPath, slugFromPath, tokenFromQuery)
+        : await fetchPublicInvitation(weddingIdFromPath, guestIdFromPath!, tokenFromQuery);
       setSelectedGuest({
         id: invitation.id,
         weddingId: invitation.weddingId,
@@ -110,7 +121,7 @@ export default function RSVP({ theme }: RSVPProps) {
     setError('');
 
     try {
-      if (!weddingIdFromPath || !guestIdFromPath || !tokenFromQuery) {
+      if (!weddingIdFromPath || !tokenFromQuery || (!guestIdFromPath && !slugFromPath)) {
         throw new Error('Missing invitation details.');
       }
       const trimmedPartySize = partySize.trim();
@@ -124,11 +135,17 @@ export default function RSVP({ theme }: RSVPProps) {
       const parsedPartySize = Number(trimmedPartySize);
       const normalizedPartySize =
         Number.isFinite(parsedPartySize) && parsedPartySize > 0 ? Math.floor(parsedPartySize) : 1;
-      const updated = await submitPublicRsvp(weddingIdFromPath, guestIdFromPath, {
-        token: tokenFromQuery,
-        status,
-        partySize: normalizedPartySize,
-      });
+      const updated = slugFromPath
+        ? await submitPublicRsvpBySlug(weddingIdFromPath, slugFromPath, {
+            token: tokenFromQuery,
+            status,
+            partySize: normalizedPartySize,
+          })
+        : await submitPublicRsvp(weddingIdFromPath, guestIdFromPath!, {
+            token: tokenFromQuery,
+            status,
+            partySize: normalizedPartySize,
+          });
       setSelectedGuest(updated);
       setPartySize(String(updated.partySize ?? ''));
       setConfirmation('תודה! אישור ההגעה התקבל.');

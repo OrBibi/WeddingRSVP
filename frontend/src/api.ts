@@ -254,3 +254,26 @@ export const submitPublicRsvp = async (
   );
   return data;
 };
+
+export const fetchPublicInvitationBySlug = async (
+  weddingId: string,
+  slug: string,
+  token: string
+): Promise<Pick<Guest, 'id' | 'weddingId' | 'name' | 'status' | 'partySize'>> => {
+  const { data } = await publicRsvpApi.get<
+    Pick<Guest, 'id' | 'weddingId' | 'name' | 'status' | 'partySize'>
+  >(`/rsvp/${encodeURIComponent(weddingId)}/s/${encodeURIComponent(slug)}`, { params: { token } });
+  return data;
+};
+
+export const submitPublicRsvpBySlug = async (
+  weddingId: string,
+  slug: string,
+  payload: { token: string; status: GuestStatus; partySize: number }
+): Promise<Guest> => {
+  const { data } = await publicRsvpApi.put<Guest>(
+    `/rsvp/${encodeURIComponent(weddingId)}/s/${encodeURIComponent(slug)}`,
+    payload
+  );
+  return data;
+};

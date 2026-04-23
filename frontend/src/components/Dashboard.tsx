@@ -54,7 +54,7 @@ export default function Dashboard() {
   const [formError, setFormError] = useState('');
   const [form, setForm] = useState(defaultForm);
   const [notificationMessage, setNotificationMessage] = useState(
-    'שלום {{name}}, נשמח לראות אותך בחתונה שלנו.\n\nלאישור הגעה:\n{{link_here}}'
+    'שלום {{name}}, נשמח לראות אותך בחתונה שלנו. לאישור הגעה: {{link}}'
   );
   const [notificationFilter, setNotificationFilter] = useState<'All' | Guest['status']>('All');
   const [notificationMessageSentFilter, setNotificationMessageSentFilter] =
@@ -1054,14 +1054,11 @@ export default function Dashboard() {
               className="min-h-28 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-amber-500 focus:outline-none"
               id="wa-message"
               onChange={(e) => setNotificationMessage(e.target.value)}
-              placeholder="שלום {{name}}, לאישור הגעה: {{link_here}}"
+              placeholder="שלום {{name}}, לאישור הגעה לחצו על {{link}}"
               value={notificationMessage}
             />
             <p className="mt-1 text-xs text-slate-500">
-              משתנים: {'{{name}}'}, {'{{link}}'} (כתובת מלאה בלבד), {'{{link_here}}'} (שורת ״לחץ כאן״ ואז הקישור).
-            </p>
-            <p className="mt-1 text-xs text-slate-500">
-              בוואטסאפ אי אפשר להסתיר את כתובת ה-URL ולהשאיר רק מילים לחיצות כמו באתרי אינטרנט; המערכת יכולה רק לפרק לשורות עם טקסט ברור לפני הקישור.
+              ניתן להשתמש במשתנים: {'{{name}}'}, {'{{link}}'}, {'{{link_here}}'} (טקסט ״לחץ כאן״ בשורה לפני הקישור).
             </p>
           </div>
 

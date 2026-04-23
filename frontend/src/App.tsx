@@ -6,7 +6,10 @@ type View = 'dashboard' | 'rsvp';
 export type RSVPTheme = 'floral' | 'ocean' | 'classic';
 
 function App() {
-  const isPublicRsvpRoute = useMemo(() => /^\/rsvp\/[^/]+\/[^/]+/.test(window.location.pathname), []);
+  const isPublicRsvpRoute = useMemo(() => {
+    const path = window.location.pathname;
+    return /^\/rsvp\/[^/]+\/[^/]+$/.test(path) || /^\/r\/[^/]+\/[^/]+$/.test(path);
+  }, []);
   const isRsvpOnlyMode = import.meta.env.VITE_RSVP_ONLY === 'true';
   const [view, setView] = useState<View>('dashboard');
   const [rsvpTheme, setRsvpTheme] = useState<RSVPTheme>('floral');
