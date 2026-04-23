@@ -171,7 +171,7 @@ export default function RSVP({ theme }: RSVPProps) {
             <h2 className="text-4xl font-semibold tracking-wide text-wedding-charcoal sm:text-5xl lg:text-6xl">
               נשמח לראותכם
             </h2>
-            <p className="mt-4 font-sans text-lg text-slate-600 sm:text-xl">
+            <p className="mt-4 font-sans text-xl text-slate-600 sm:text-2xl">
               אור וקרן אור - 11.5
             </p>
           </header>
@@ -187,7 +187,7 @@ export default function RSVP({ theme }: RSVPProps) {
 
           {selectedGuest && (
             <form className="mt-10 animate-slide-up space-y-6 border-t border-wedding-gold/20 pt-8" onSubmit={submitRsvp}>
-              <p className="text-lg text-slate-700 sm:text-xl">
+              <p className="text-xl text-slate-700 sm:text-2xl">
                 שלום <span className="font-semibold text-wedding-charcoal">{selectedGuest.name}</span>, נא לעדכן את פרטי ההגעה:
               </p>
 
