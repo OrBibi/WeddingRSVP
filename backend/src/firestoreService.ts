@@ -5,6 +5,17 @@ import { firestore } from './firebaseAdmin';
 const usersCollection = firestore.collection('users');
 const weddingsCollection = firestore.collection('weddings');
 
+const normalizePhoneForComparison = (phone: string): string => {
+  const digitsOnly = phone.replace(/\D/g, '');
+  if (digitsOnly.startsWith('972')) {
+    return `0${digitsOnly.slice(3)}`;
+  }
+  if (digitsOnly.length === 9) {
+    return `0${digitsOnly}`;
+  }
+  return digitsOnly;
+};
+
 export const ensureUserWedding = async (uid: string, email?: string) => {
   const userRef = usersCollection.doc(uid);
   const weddingRef = weddingsCollection.doc(uid);
@@ -40,6 +51,8 @@ export const getGuestsByWeddingId = async (weddingId: string): Promise<Guest[]> 
     return {
       ...data,
       groupIds: Array.isArray(data.groupIds) ? data.groupIds : [],
+      messageSent: Boolean(data.messageSent),
+      lastMessageSentAt: typeof data.lastMessageSentAt === 'string' ? data.lastMessageSentAt : undefined,
     };
   });
 };
@@ -84,6 +97,7 @@ export const addGuestToWedding = async (
     partySize: payload.expectedPartySize,
     groupIds: [],
     rsvpToken: randomUUID(),
+    messageSent: false,
   };
   await guestsCollection(weddingId).doc(id).set(guest);
   return guest;
@@ -93,7 +107,17 @@ export const updateGuestInWedding = async (
   weddingId: string,
   guestId: string,
   updates: Partial<
-    Pick<Guest, 'name' | 'phoneNumber' | 'status' | 'partySize' | 'expectedPartySize' | 'groupIds'>
+    Pick<
+      Guest,
+      | 'name'
+      | 'phoneNumber'
+      | 'status'
+      | 'partySize'
+      | 'expectedPartySize'
+      | 'groupIds'
+      | 'messageSent'
+      | 'lastMessageSentAt'
+    >
   >
 ): Promise<Guest | null> => {
   const guestRef = guestsCollection(weddingId).doc(guestId);
@@ -107,6 +131,13 @@ export const updateGuestInWedding = async (
     ...current,
     ...updates,
     groupIds: Array.isArray(current.groupIds) ? current.groupIds : [],
+    messageSent: typeof updates.messageSent === 'boolean' ? updates.messageSent : Boolean(current.messageSent),
+    lastMessageSentAt:
+      typeof updates.lastMessageSentAt === 'string'
+        ? updates.lastMessageSentAt
+        : typeof current.lastMessageSentAt === 'string'
+          ? current.lastMessageSentAt
+          : undefined,
   };
   await guestRef.set(updated);
   return updated;
@@ -124,14 +155,19 @@ export const deleteGuestInWedding = async (weddingId: string, guestId: string): 
 };
 
 export const findGuestByPhone = async (weddingId: string, phoneNumber: string): Promise<Guest | null> => {
-  const snapshot = await guestsCollection(weddingId).where('phoneNumber', '==', phoneNumber).limit(1).get();
-  if (snapshot.empty) {
+  const normalizedSearchPhone = normalizePhoneForComparison(phoneNumber);
+  const guests = await getGuestsByWeddingId(weddingId);
+  const found = guests.find(
+    (guest) => normalizePhoneForComparison(guest.phoneNumber) === normalizedSearchPhone
+  );
+  if (!found) {
     return null;
   }
-  const data = snapshot.docs[0].data() as Guest;
   return {
-    ...data,
-    groupIds: Array.isArray(data.groupIds) ? data.groupIds : [],
+    ...found,
+    groupIds: Array.isArray(found.groupIds) ? found.groupIds : [],
+    messageSent: Boolean(found.messageSent),
+    lastMessageSentAt: typeof found.lastMessageSentAt === 'string' ? found.lastMessageSentAt : undefined,
   };
 };
 
@@ -144,6 +180,8 @@ export const findGuestById = async (weddingId: string, guestId: string): Promise
   return {
     ...data,
     groupIds: Array.isArray(data.groupIds) ? data.groupIds : [],
+    messageSent: Boolean(data.messageSent),
+    lastMessageSentAt: typeof data.lastMessageSentAt === 'string' ? data.lastMessageSentAt : undefined,
   };
 };
 
@@ -175,13 +213,16 @@ export const importGuestsToWedding = async (
   }>
 ) => {
   const existingGuests = await getGuestsByWeddingId(weddingId);
-  const existingPhones = new Set(existingGuests.map((guest) => guest.phoneNumber));
+  const existingPhones = new Set(
+    existingGuests.map((guest) => normalizePhoneForComparison(guest.phoneNumber))
+  );
 
   const createdGuests: Guest[] = [];
   let skippedCount = 0;
 
   for (const row of input) {
-    if (existingPhones.has(row.phoneNumber)) {
+    const normalizedPhone = normalizePhoneForComparison(row.phoneNumber);
+    if (existingPhones.has(normalizedPhone)) {
       skippedCount += 1;
       continue;
     }
@@ -195,9 +236,10 @@ export const importGuestsToWedding = async (
       partySize: row.status === 'Attending' ? row.expectedPartySize : 1,
       groupIds: Array.isArray(row.groupIds) ? [...new Set(row.groupIds)] : [],
       rsvpToken: randomUUID(),
+      messageSent: false,
     };
     await guestsCollection(weddingId).doc(guest.id).set(guest);
-    existingPhones.add(row.phoneNumber);
+    existingPhones.add(normalizedPhone);
     createdGuests.push(guest);
   }
 

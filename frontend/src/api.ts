@@ -52,12 +52,16 @@ export interface UpdateGuestPayload {
 }
 
 export type NotificationStatusFilter = 'All' | GuestStatus;
+export type NotificationMessageSentFilter = 'All' | 'Sent' | 'Not Sent';
 
 export interface WhatsAppNotificationPayload {
   messageTemplate: string;
   statusFilter: NotificationStatusFilter;
+  messageSentFilter: NotificationMessageSentFilter;
   rsvpLink: string;
   groupId?: string;
+  selectedGuestIds?: string[];
+  progressSessionId?: string;
   media?: {
     dataUrl: string;
     fileName?: string;
@@ -76,6 +80,46 @@ export interface WhatsAppStatusResponse {
   qrDataUrl: string | null;
   message: string;
 }
+
+export interface WhatsAppProgressState {
+  totalRecipients: number;
+  processedCount: number;
+  sentCount: number;
+  failedCount: number;
+  currentGuestId: string | null;
+}
+
+export const openWhatsAppProgressStream = (
+  sessionId: string,
+  handlers: {
+    onStarted?: (state: WhatsAppProgressState) => void;
+    onProgress?: (state: WhatsAppProgressState) => void;
+    onCompleted?: (state: WhatsAppProgressState) => void;
+    onError?: (payload: { message?: string }) => void;
+  }
+) => {
+  const source = new EventSource(
+    `${API_URL.replace(/\/$/, '')}/notifications/whatsapp/progress/${encodeURIComponent(sessionId)}`
+  );
+
+  source.addEventListener('started', (event) => {
+    handlers.onStarted?.(JSON.parse((event as MessageEvent).data) as WhatsAppProgressState);
+  });
+  source.addEventListener('progress', (event) => {
+    handlers.onProgress?.(JSON.parse((event as MessageEvent).data) as WhatsAppProgressState);
+  });
+  source.addEventListener('completed', (event) => {
+    handlers.onCompleted?.(JSON.parse((event as MessageEvent).data) as WhatsAppProgressState);
+  });
+  source.addEventListener('error', (event) => {
+    handlers.onError?.(JSON.parse((event as MessageEvent).data) as { message?: string });
+  });
+  source.onerror = () => {
+    handlers.onError?.({ message: 'SSE connection dropped.' });
+  };
+
+  return source;
+};
 
 export const setApiAuthToken = (token: string | null) => {
   authToken = token;

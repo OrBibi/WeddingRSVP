@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { Guest, GuestGroup } from '../../../shared/types';
 import {
   bulkUpdateGuestGroups,
@@ -12,7 +12,10 @@ import {
   fetchGroups,
   fetchWhatsAppStatus,
   importGuests,
+  openWhatsAppProgressStream,
+  type NotificationMessageSentFilter,
   sendWhatsAppNotifications,
+  type WhatsAppProgressState,
   triggerNotifications,
   updateGuest,
 } from '../api';
@@ -54,7 +57,10 @@ export default function Dashboard() {
     'שלום {{name}}, נשמח לראות אותך בחתונה שלנו. לאישור הגעה: {{link}}'
   );
   const [notificationFilter, setNotificationFilter] = useState<'All' | Guest['status']>('All');
+  const [notificationMessageSentFilter, setNotificationMessageSentFilter] =
+    useState<NotificationMessageSentFilter>('All');
   const [notificationGroupFilter, setNotificationGroupFilter] = useState('');
+  const [notificationSelectedOnly, setNotificationSelectedOnly] = useState(false);
   const [notificationLink, setNotificationLink] = useState(
     import.meta.env.VITE_PUBLIC_RSVP_SITE_URL || 'http://localhost:5173'
   );
@@ -97,6 +103,8 @@ export default function Dashboard() {
   const [whatsAppQrDataUrl, setWhatsAppQrDataUrl] = useState<string | null>(null);
   const [whatsAppStatusMessage, setWhatsAppStatusMessage] = useState('טוען מצב התחברות לוואטסאפ...');
   const [disconnectingWhatsApp, setDisconnectingWhatsApp] = useState(false);
+  const [sendProgress, setSendProgress] = useState<WhatsAppProgressState | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
 
   const sortedGuests = useMemo(
     () => [...guests].sort((a, b) => a.name.localeCompare(b.name)),
@@ -148,6 +156,10 @@ export default function Dashboard() {
   const waitingExpectedGuests = guests
     .filter((guest) => guest.status === 'Pending')
     .reduce((sum, guest) => sum + guest.expectedPartySize, 0);
+  const progressPercent =
+    sendProgress && sendProgress.totalRecipients > 0
+      ? Math.round((sendProgress.processedCount / sendProgress.totalRecipients) * 100)
+      : 0;
   const groupNameById = useMemo(
     () => new Map(groups.map((group) => [group.id, group.name])),
     [groups]
@@ -162,6 +174,7 @@ export default function Dashboard() {
         data.map((guest) => ({
           ...guest,
           groupIds: Array.isArray(guest.groupIds) ? guest.groupIds : [],
+          messageSent: Boolean(guest.messageSent),
         }))
       );
     } catch {
@@ -208,6 +221,14 @@ export default function Dashboard() {
     return () => window.clearInterval(intervalId);
   }, []);
 
+  useEffect(
+    () => () => {
+      eventSourceRef.current?.close();
+      eventSourceRef.current = null;
+    },
+    []
+  );
+
   const addGuest = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setFormError('');
@@ -248,14 +269,45 @@ export default function Dashboard() {
       setNotificationError('יש להזין תוכן להודעה לפני השליחה.');
       return;
     }
+    if (notificationSelectedOnly && selectedGuestIds.size === 0) {
+      setNotificationError('בחרת "מסומנים בלבד", אך אין אורחים מסומנים כרגע.');
+      return;
+    }
 
     setSendingNotifications(true);
+    setSendProgress(null);
+
+    const progressSessionId =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `session-${Date.now()}`;
+    eventSourceRef.current?.close();
+    eventSourceRef.current = openWhatsAppProgressStream(progressSessionId, {
+      onStarted: (state) => {
+        setSendProgress(state);
+      },
+      onProgress: (state) => {
+        setSendProgress(state);
+      },
+      onCompleted: (state) => {
+        setSendProgress(state);
+      },
+      onError: (payload) => {
+        if (payload?.message) {
+          setNotificationError(payload.message);
+        }
+      },
+    });
+
     try {
       const payload = {
         messageTemplate: notificationMessage.trim(),
         statusFilter: notificationFilter,
+        messageSentFilter: notificationMessageSentFilter,
         rsvpLink: notificationLink.trim(),
         groupId: notificationGroupFilter || undefined,
+        selectedGuestIds: notificationSelectedOnly ? [...selectedGuestIds] : undefined,
+        progressSessionId,
         media: notificationImage,
       };
       console.log('Submitting WhatsApp notification payload:', payload);
@@ -265,6 +317,7 @@ export default function Dashboard() {
           ? `, ${result.failedCount} נכשלו`
           : '';
       alert(`ההודעות נשלחו. ${result.sentCount} הצליחו${failedText}.`);
+      await loadGuests();
     } catch (submitError: unknown) {
       const backendMessage = axios.isAxiosError<{ message?: string }>(submitError)
         ? submitError.response?.data?.message
@@ -276,6 +329,8 @@ export default function Dashboard() {
         console.error('WhatsApp notification request failed:', submitError.message);
       }
     } finally {
+      eventSourceRef.current?.close();
+      eventSourceRef.current = null;
       setSendingNotifications(false);
     }
   };
@@ -1035,6 +1090,24 @@ export default function Dashboard() {
           </div>
 
           <div>
+            <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="wa-sent-filter">
+              נשלחה הודעה
+            </label>
+            <select
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-amber-500 focus:outline-none"
+              id="wa-sent-filter"
+              onChange={(event) =>
+                setNotificationMessageSentFilter(event.target.value as NotificationMessageSentFilter)
+              }
+              value={notificationMessageSentFilter}
+            >
+              <option value="All">הכל</option>
+              <option value="Sent">כן</option>
+              <option value="Not Sent">לא</option>
+            </select>
+          </div>
+
+          <div>
             <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="wa-group-filter">
               סינון לפי קבוצה (אופציונלי)
             </label>
@@ -1084,6 +1157,34 @@ export default function Dashboard() {
               </div>
             )}
           </div>
+
+          <label className="flex items-center gap-2 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-slate-700">
+            <input
+              checked={notificationSelectedOnly}
+              className="h-4 w-4"
+              onChange={(event) => setNotificationSelectedOnly(event.target.checked)}
+              type="checkbox"
+            />
+            מסומנים בלבד ({selectedGuestIds.size})
+          </label>
+
+          {sendingNotifications && sendProgress && (
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+              <p className="text-sm font-medium text-emerald-900">
+                נשלחו {sendProgress.sentCount} מתוך {sendProgress.totalRecipients}
+              </p>
+              <div className="mt-2 h-3 w-full overflow-hidden rounded-full bg-emerald-100">
+                <div
+                  className="h-full bg-emerald-500 transition-all duration-300"
+                  style={{ width: `${progressPercent}%` }}
+                />
+              </div>
+              <p className="mt-2 text-xs text-emerald-800">
+                עובדו {sendProgress.processedCount}/{sendProgress.totalRecipients} | הצליחו{' '}
+                {sendProgress.sentCount} | נכשלו {sendProgress.failedCount}
+              </p>
+            </div>
+          )}
 
           <button
             className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-amber-700 disabled:cursor-not-allowed disabled:bg-amber-300"
@@ -1185,6 +1286,7 @@ export default function Dashboard() {
                 </th>
                 <th className="px-4 py-3 text-xs font-semibold tracking-wider text-wedding-gold">כמות אורחים</th>
                 <th className="px-4 py-3 text-xs font-semibold tracking-wider text-wedding-gold">כמות אורחים צפויה</th>
+                <th className="px-4 py-3 text-xs font-semibold tracking-wider text-wedding-gold">נשלחה הודעה</th>
                 <th className="px-4 py-3 text-xs font-semibold tracking-wider text-wedding-gold">קבוצות</th>
                 <th className="px-4 py-3 text-xs font-semibold tracking-wider text-wedding-gold">פעולות</th>
               </tr>
@@ -1192,19 +1294,19 @@ export default function Dashboard() {
             <tbody className="divide-y divide-gray-100">
               {loading ? (
                 <tr>
-                  <td className="px-4 py-4 text-slate-500" colSpan={8}>
+                  <td className="px-4 py-4 text-slate-500" colSpan={9}>
                     טוען...
                   </td>
                 </tr>
               ) : error ? (
                 <tr>
-                  <td className="px-4 py-4 text-red-600" colSpan={8}>
+                  <td className="px-4 py-4 text-red-600" colSpan={9}>
                     {error}
                   </td>
                 </tr>
               ) : filteredGuests.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-4 text-slate-500" colSpan={8}>
+                  <td className="px-4 py-4 text-slate-500" colSpan={9}>
                     {searchQuery.trim()
                       ? 'לא נמצאו אורחים התואמים לחיפוש.'
                       : 'אין אורחים כרגע.'}
@@ -1309,6 +1411,15 @@ export default function Dashboard() {
                       ) : (
                         guest.expectedPartySize
                       )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span
+                        className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${
+                          guest.messageSent ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-700'
+                        }`}
+                      >
+                        {guest.messageSent ? 'כן' : 'לא'}
+                      </span>
                     </td>
                     <td className="px-4 py-3">
                       {editingPhone === guest.phoneNumber ? (

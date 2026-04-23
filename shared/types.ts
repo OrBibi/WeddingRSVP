@@ -10,6 +10,8 @@ export interface Guest {
   partySize: number;
   groupIds: string[];
   rsvpToken?: string;
+  messageSent?: boolean;
+  lastMessageSentAt?: string;
 }
 
 export interface GuestGroup {

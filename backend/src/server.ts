@@ -1,5 +1,6 @@
 import cors from 'cors';
 import express from 'express';
+import type { Response } from 'express';
 import type { Guest, GuestStatus } from '../../shared/types';
 import QRCode from 'qrcode';
 import { Client, LocalAuth, MessageMedia } from 'whatsapp-web.js';
@@ -143,11 +144,24 @@ const disconnectWhatsAppSession = async (uid: string) => {
 
 const statuses: GuestStatus[] = ['Pending', 'Attending', 'Not Attending'];
 type StatusFilter = 'All' | GuestStatus;
+type MessageSentFilter = 'All' | 'Sent' | 'Not Sent';
+type WhatsAppProgressState = {
+  totalRecipients: number;
+  processedCount: number;
+  sentCount: number;
+  failedCount: number;
+  currentGuestId: string | null;
+};
+type ProgressEvent = 'started' | 'progress' | 'completed' | 'error';
+
+const whatsappProgressStreams = new Map<string, Response>();
 
 const isValidStatus = (value: unknown): value is GuestStatus =>
   typeof value === 'string' && statuses.includes(value as GuestStatus);
 const isValidStatusFilter = (value: unknown): value is StatusFilter =>
   value === 'All' || isValidStatus(value);
+const isValidMessageSentFilter = (value: unknown): value is MessageSentFilter =>
+  value === 'All' || value === 'Sent' || value === 'Not Sent';
 
 const normalizePhoneForComparison = (phone: string): string => {
   const digitsOnly = phone.replace(/\D/g, '');
@@ -189,16 +203,46 @@ const filterGuestsByGroup = (guests: Guest[], groupId?: string) => {
   return guests.filter((guest) => Array.isArray(guest.groupIds) && guest.groupIds.includes(groupId));
 };
 
+const filterGuestsByMessageSent = (guests: Guest[], messageSentFilter: MessageSentFilter) => {
+  if (messageSentFilter === 'All') {
+    return guests;
+  }
+  if (messageSentFilter === 'Sent') {
+    return guests.filter((guest) => Boolean(guest.messageSent));
+  }
+  return guests.filter((guest) => !guest.messageSent);
+};
+
+const filterGuestsBySelectedIds = (guests: Guest[], selectedGuestIds?: string[]) => {
+  if (!Array.isArray(selectedGuestIds) || selectedGuestIds.length === 0) {
+    return guests;
+  }
+  const idSet = new Set(selectedGuestIds);
+  return guests.filter((guest) => idSet.has(guest.id));
+};
+
+const emitProgressEvent = (sessionId: string, event: ProgressEvent, payload: unknown) => {
+  const stream = whatsappProgressStreams.get(sessionId);
+  if (!stream) {
+    return;
+  }
+
+  stream.write(`event: ${event}\n`);
+  stream.write(`data: ${JSON.stringify(payload)}\n\n`);
+};
+
 const sendWhatsAppBatch = async (
   client: Client,
   weddingId: string,
   guestsToNotify: Guest[],
   messageTemplate: string,
   rsvpLink: string,
-  media?: { dataUrl: string; fileName?: string } | null
+  media?: { dataUrl: string; fileName?: string } | null,
+  onProgress?: (state: WhatsAppProgressState) => void
 ): Promise<{ sentCount: number; failedCount: number }> => {
   let sentCount = 0;
   let failedCount = 0;
+  let processedCount = 0;
   let messageMedia: MessageMedia | null = null;
 
   if (media?.dataUrl) {
@@ -224,10 +268,25 @@ const sendWhatsAppBatch = async (
       } else {
         await client.sendMessage(formattedPhone, text);
       }
+      await updateGuestInWedding(weddingId, guest.id, {
+        messageSent: true,
+        lastMessageSentAt: new Date().toISOString(),
+      });
       sentCount += 1;
     } catch (error) {
       failedCount += 1;
       console.error(`WhatsApp send failed for guest ${guest.id}:`, error);
+    }
+
+    processedCount += 1;
+    if (onProgress) {
+      onProgress({
+        totalRecipients: guestsToNotify.length,
+        processedCount,
+        sentCount,
+        failedCount,
+        currentGuestId: guest.id,
+      });
     }
 
     if (index < guestsToNotify.length - 1) {
@@ -237,6 +296,24 @@ const sendWhatsAppBatch = async (
   }
   return { sentCount, failedCount };
 };
+
+app.get('/api/notifications/whatsapp/progress/:sessionId', (req, res) => {
+  const sessionId = String(req.params.sessionId ?? '').trim();
+  if (!sessionId) {
+    return res.status(400).json({ message: 'sessionId is required.' });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  whatsappProgressStreams.set(sessionId, res);
+
+  req.on('close', () => {
+    whatsappProgressStreams.delete(sessionId);
+  });
+});
 
 app.post('/api/auth/bootstrap', async (_req, res) => {
   return res.json({
@@ -533,12 +610,15 @@ app.post('/api/notifications/trigger', async (_req, res) => {
 });
 
 app.post('/api/notifications/whatsapp', async (req, res) => {
-  const { messageTemplate, statusFilter, rsvpLink, media, groupId } = req.body as {
+  const { messageTemplate, statusFilter, rsvpLink, media, groupId, messageSentFilter, selectedGuestIds, progressSessionId } = req.body as {
     messageTemplate?: string;
     statusFilter?: StatusFilter;
     rsvpLink?: string;
     media?: { dataUrl?: string; fileName?: string } | null;
     groupId?: string;
+    messageSentFilter?: MessageSentFilter;
+    selectedGuestIds?: string[];
+    progressSessionId?: string;
   };
 
   const whatsappSession = getOrCreateWhatsAppSession(DEFAULT_WEDDING_ID);
@@ -548,9 +628,14 @@ app.post('/api/notifications/whatsapp', async (req, res) => {
     });
   }
 
-  if (!messageTemplate?.trim() || !rsvpLink?.trim() || !isValidStatusFilter(statusFilter)) {
+  if (
+    !messageTemplate?.trim() ||
+    !rsvpLink?.trim() ||
+    !isValidStatusFilter(statusFilter) ||
+    !isValidMessageSentFilter(messageSentFilter)
+  ) {
     return res.status(400).json({
-      message: 'messageTemplate, rsvpLink, and a valid statusFilter are required.',
+      message: 'messageTemplate, rsvpLink, valid statusFilter, and valid messageSentFilter are required.',
     });
   }
   if (media && typeof media.dataUrl !== 'string') {
@@ -566,12 +651,33 @@ app.post('/api/notifications/whatsapp', async (req, res) => {
   const weddingId = DEFAULT_WEDDING_ID;
   const allGuests = await getGuestsByWeddingId(weddingId);
   const statusFiltered = filterGuestsByStatus(allGuests, statusFilter);
-  const guestsToNotify = filterGuestsByGroup(statusFiltered, groupId);
+  const groupFiltered = filterGuestsByGroup(statusFiltered, groupId);
+  const sentFiltered = filterGuestsByMessageSent(groupFiltered, messageSentFilter);
+  const guestsToNotify = filterGuestsBySelectedIds(sentFiltered, selectedGuestIds);
   console.log('Incoming WhatsApp notification request:', {
     statusFilter,
     groupId: groupId ?? null,
+    messageSentFilter,
+    selectedGuestIdsCount: Array.isArray(selectedGuestIds) ? selectedGuestIds.length : 0,
     recipients: guestsToNotify.length,
   });
+
+  if (guestsToNotify.length === 0) {
+    return res.status(400).json({
+      message: 'No guests match the selected filters.',
+    });
+  }
+
+  const trimmedSessionId = typeof progressSessionId === 'string' ? progressSessionId.trim() : '';
+  if (trimmedSessionId) {
+    emitProgressEvent(trimmedSessionId, 'started', {
+      totalRecipients: guestsToNotify.length,
+      processedCount: 0,
+      sentCount: 0,
+      failedCount: 0,
+      currentGuestId: null,
+    });
+  }
 
   try {
     const { sentCount, failedCount } = await sendWhatsAppBatch(
@@ -580,8 +686,22 @@ app.post('/api/notifications/whatsapp', async (req, res) => {
       guestsToNotify,
       messageTemplate.trim(),
       rsvpLink.trim(),
-      normalizedMedia
+      normalizedMedia,
+      (state) => {
+        if (trimmedSessionId) {
+          emitProgressEvent(trimmedSessionId, 'progress', state);
+        }
+      }
     );
+    if (trimmedSessionId) {
+      emitProgressEvent(trimmedSessionId, 'completed', {
+        totalRecipients: guestsToNotify.length,
+        processedCount: guestsToNotify.length,
+        sentCount,
+        failedCount,
+        currentGuestId: null,
+      });
+    }
     return res.json({
       message: 'WhatsApp notifications sent successfully.',
       queuedCount: 0,
@@ -589,6 +709,11 @@ app.post('/api/notifications/whatsapp', async (req, res) => {
       failedCount,
     });
   } catch (error) {
+    if (trimmedSessionId) {
+      emitProgressEvent(trimmedSessionId, 'error', {
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
     return res.status(500).json({
       message: 'Failed to send WhatsApp notifications.',
       error: error instanceof Error ? error.message : 'Unknown error',
