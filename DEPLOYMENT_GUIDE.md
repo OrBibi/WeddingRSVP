@@ -1,37 +1,62 @@
 # Deployment Guide
 
-## 1. GitHub Setup
+This project is configured for a **hybrid flow**:
+- local admin runtime (backend + dashboard) on your machine
+- public RSVP site on Vercel
 
-1. Create a new GitHub repository.
-2. Commit all project files.
-3. Push your code to GitHub.
+## 1) Local Admin Runtime (your computer)
 
-## 2. Render (Backend) Deployment
+1. Create `backend/.env` from `backend/.env.example`.
+2. Create `frontend/.env` from `frontend/.env.example`.
+3. Install dependencies:
+   ```bash
+   npm install
+   npm install --prefix backend
+   npm install --prefix frontend
+   ```
+4. Start local app:
+   ```bash
+   npm run dev
+   ```
+5. Open dashboard at `http://localhost:5173`.
+6. In WhatsApp section:
+   - scan QR to connect account
+   - use "disconnect account" when you want to switch WhatsApp numbers
 
-1. Go to [dashboard.render.com](https://dashboard.render.com).
-2. Click **New Web Service**.
-3. Connect your GitHub repository.
-4. Set the **Root Directory** to `backend`.
-5. Set **Build Command** to `npm install`.
-6. Set **Start Command** to `npm start`.
-7. Deploy the service.
+## 2) Public RSVP App on Vercel
 
-## 3. Crucial Render Step
+Deploy **frontend only** as a separate Vercel project:
+- Project root: `frontend`
+- Build command: `npm run build`
+- Output: `dist`
 
-After the backend is deployed, open the Render **Logs** and scan the WhatsApp QR code flow from the backend status endpoint to connect your WhatsApp client session.
+Required Vercel env for RSVP API routes:
+- `FIREBASE_SERVICE_ACCOUNT_JSON` (recommended)
+  - or split vars: `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`
 
-## 4. Frontend Deployment
+Optional Vercel env for frontend:
+- `VITE_PUBLIC_RSVP_API_URL=/api/public`
 
-1. In `frontend`, create a `.env` file with:
+`frontend/vercel.json` already includes SPA rewrites and preserves `/api/*` routes.
 
-```bash
-VITE_API_URL=https://<YOUR_RENDER_URL>/api
-```
+## 3) Link Generation for Guests
 
-2. Ensure `frontend/vite.config.ts` contains `base: '/WeddingRSVP/'`.
-3. Ensure `frontend/package.json` contains `homepage: 'https://OrBibi.github.io/WeddingRSVP'`.
-4. Run from the `frontend` folder:
+In your local dashboard, set RSVP base link to your Vercel RSVP domain:
+- Example: `https://your-rsvp.vercel.app`
 
-```bash
-npm run deploy
-```
+Each sent guest gets:
+- `/rsvp/{weddingId}/{guestId}?token={rsvpToken}`
+
+## 4) Operational Flow
+
+1. Run local admin app.
+2. Send invitations via WhatsApp from local dashboard.
+3. You can close local app after sending.
+4. Guests still open RSVP links on Vercel and update attendance.
+5. Later, reopen local app and load latest status from Firestore.
+
+## 5) Reliability notes
+
+- Scheduled messages were removed.
+- WhatsApp sending has randomized delay between recipients (`WA_DELAY_MIN_MS` / `WA_DELAY_MAX_MS`).
+- To reduce local downtime, run backend with a process manager (PM2/NSSM/Docker restart policy) when needed.
