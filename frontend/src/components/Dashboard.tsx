@@ -1,20 +1,23 @@
 import axios from 'axios';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import type { Guest, GuestGroup } from '../../../shared/types';
+import type { Guest, GuestGroup, WhatsAppSendJob } from '../../../shared/types';
 import {
   bulkUpdateGuestGroups,
+  createWhatsAppSendJob,
   createGroup,
   createGuest,
   deleteGroup,
   deleteGuest,
   disconnectWhatsApp,
+  fetchWhatsAppSendJob,
   fetchGuests,
   fetchGroups,
   fetchWhatsAppStatus,
   importGuests,
   openWhatsAppProgressStream,
+  pauseWhatsAppSendJob,
+  resumeWhatsAppSendJob,
   type NotificationMessageSentFilter,
-  sendWhatsAppNotifications,
   type WhatsAppProgressState,
   triggerNotifications,
   updateGuest,
@@ -104,6 +107,9 @@ export default function Dashboard() {
   const [whatsAppStatusMessage, setWhatsAppStatusMessage] = useState('טוען מצב התחברות לוואטסאפ...');
   const [disconnectingWhatsApp, setDisconnectingWhatsApp] = useState(false);
   const [sendProgress, setSendProgress] = useState<WhatsAppProgressState | null>(null);
+  const [activeWhatsAppJob, setActiveWhatsAppJob] = useState<WhatsAppSendJob | null>(null);
+  const [pausingJob, setPausingJob] = useState(false);
+  const [resumingJob, setResumingJob] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
 
   const sortedGuests = useMemo(
@@ -296,11 +302,21 @@ export default function Dashboard() {
       },
       onCompleted: (state) => {
         setSendProgress(state);
+        eventSourceRef.current?.close();
+        eventSourceRef.current = null;
+        if (activeWhatsAppJob) {
+          void fetchWhatsAppSendJob(activeWhatsAppJob.id).then((job) => {
+            setActiveWhatsAppJob(job);
+          });
+        }
+        void loadGuests();
       },
       onError: (payload) => {
         if (payload?.message) {
           setNotificationError(payload.message);
         }
+        eventSourceRef.current?.close();
+        eventSourceRef.current = null;
       },
     });
 
@@ -315,14 +331,11 @@ export default function Dashboard() {
         progressSessionId,
         media: notificationImage,
       };
-      console.log('Submitting WhatsApp notification payload:', payload);
-      const result = await sendWhatsAppNotifications(payload);
-      const failedText =
-        typeof result.failedCount === 'number' && result.failedCount > 0
-          ? `, ${result.failedCount} נכשלו`
-          : '';
-      alert(`ההודעות נשלחו. ${result.sentCount} הצליחו${failedText}.`);
-      await loadGuests();
+      const created = await createWhatsAppSendJob({
+        ...payload,
+        idempotencyKey: progressSessionId,
+      });
+      setActiveWhatsAppJob(created.job);
     } catch (submitError: unknown) {
       const backendMessage = axios.isAxiosError<{ message?: string }>(submitError)
         ? submitError.response?.data?.message
@@ -334,9 +347,37 @@ export default function Dashboard() {
         console.error('WhatsApp notification request failed:', submitError.message);
       }
     } finally {
-      eventSourceRef.current?.close();
-      eventSourceRef.current = null;
       setSendingNotifications(false);
+    }
+  };
+
+  const handlePauseWhatsAppJob = async () => {
+    if (!activeWhatsAppJob) {
+      return;
+    }
+    setPausingJob(true);
+    try {
+      const paused = await pauseWhatsAppSendJob(activeWhatsAppJob.id);
+      setActiveWhatsAppJob(paused.job);
+    } catch {
+      setNotificationError('לא ניתן להשהות את השליחה כרגע.');
+    } finally {
+      setPausingJob(false);
+    }
+  };
+
+  const handleResumeWhatsAppJob = async () => {
+    if (!activeWhatsAppJob) {
+      return;
+    }
+    setResumingJob(true);
+    try {
+      const resumed = await resumeWhatsAppSendJob(activeWhatsAppJob.id);
+      setActiveWhatsAppJob(resumed.job);
+    } catch {
+      setNotificationError('לא ניתן להמשיך את השליחה כרגע.');
+    } finally {
+      setResumingJob(false);
     }
   };
 
@@ -1190,13 +1231,42 @@ export default function Dashboard() {
               </p>
             </div>
           )}
+          {activeWhatsAppJob && (
+            <div className="rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm text-slate-700">
+              <p>
+                מצב משימה: {activeWhatsAppJob.status} | עובדו {activeWhatsAppJob.processedCount}/
+                {activeWhatsAppJob.totalRecipients}
+              </p>
+              <p>
+                הצליחו {activeWhatsAppJob.sentCount} | נכשלו {activeWhatsAppJob.failedCount}
+              </p>
+              <div className="mt-2 flex gap-2">
+                <button
+                  className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800 disabled:opacity-60"
+                  disabled={pausingJob || activeWhatsAppJob.status !== 'running'}
+                  onClick={() => void handlePauseWhatsAppJob()}
+                  type="button"
+                >
+                  {pausingJob ? 'ממתין...' : 'השהה שליחה'}
+                </button>
+                <button
+                  className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-800 disabled:opacity-60"
+                  disabled={resumingJob || activeWhatsAppJob.status !== 'paused'}
+                  onClick={() => void handleResumeWhatsAppJob()}
+                  type="button"
+                >
+                  {resumingJob ? 'ממתין...' : 'המשך שליחה'}
+                </button>
+              </div>
+            </div>
+          )}
 
           <button
             className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-amber-700 disabled:cursor-not-allowed disabled:bg-amber-300"
-            disabled={sendingNotifications}
+            disabled={sendingNotifications || activeWhatsAppJob?.status === 'running'}
             type="submit"
           >
-            {sendingNotifications ? 'טוען...' : 'שלח הודעות וואטסאפ'}
+            {sendingNotifications ? 'יוצר משימה...' : 'שלח הודעות וואטסאפ'}
           </button>
         </form>
         {notificationError && <p className="mt-3 text-sm text-red-600">{notificationError}</p>}

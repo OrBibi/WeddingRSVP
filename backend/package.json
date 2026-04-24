@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/backend/src/server.js"
+    "start": "node dist/backend/src/server.js",
+    "test": "npm run build && node --test dist/backend/src/**/*.test.js"
   },
   "keywords": [],
   "author": "",

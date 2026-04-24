@@ -1,5 +1,11 @@
 import axios from 'axios';
-import type { Guest, GuestGroup, GuestStatus } from '../../shared/types';
+import type {
+  Guest,
+  GuestGroup,
+  GuestStatus,
+  WhatsAppSendJob,
+  WhatsAppSendJobStatus,
+} from '../../shared/types';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
 const PUBLIC_RSVP_API_URL =
@@ -73,6 +79,8 @@ export interface WhatsAppNotificationResponse {
   queuedCount: number;
   sentCount: number;
   failedCount?: number;
+  jobId?: string;
+  status?: WhatsAppSendJobStatus;
 }
 
 export interface WhatsAppStatusResponse {
@@ -216,6 +224,39 @@ export const sendWhatsAppNotifications = async (
   payload: WhatsAppNotificationPayload
 ): Promise<WhatsAppNotificationResponse> => {
   const { data } = await api.post<WhatsAppNotificationResponse>('/notifications/whatsapp', payload);
+  return data;
+};
+
+export const createWhatsAppSendJob = async (
+  payload: WhatsAppNotificationPayload & { idempotencyKey?: string }
+): Promise<{ message: string; job: WhatsAppSendJob }> => {
+  const { data } = await api.post<{ message: string; job: WhatsAppSendJob }>(
+    '/notifications/whatsapp/jobs',
+    payload
+  );
+  return data;
+};
+
+export const fetchWhatsAppSendJob = async (jobId: string): Promise<WhatsAppSendJob> => {
+  const { data } = await api.get<WhatsAppSendJob>(
+    `/notifications/whatsapp/jobs/${encodeURIComponent(jobId)}`
+  );
+  return data;
+};
+
+export const pauseWhatsAppSendJob = async (jobId: string): Promise<{ message: string; job: WhatsAppSendJob }> => {
+  const { data } = await api.post<{ message: string; job: WhatsAppSendJob }>(
+    `/notifications/whatsapp/jobs/${encodeURIComponent(jobId)}/pause`
+  );
+  return data;
+};
+
+export const resumeWhatsAppSendJob = async (
+  jobId: string
+): Promise<{ message: string; job: WhatsAppSendJob }> => {
+  const { data } = await api.post<{ message: string; job: WhatsAppSendJob }>(
+    `/notifications/whatsapp/jobs/${encodeURIComponent(jobId)}/resume`
+  );
   return data;
 };
 

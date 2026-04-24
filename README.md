@@ -63,6 +63,27 @@ Frontend web config:
 - Sending now uses a randomized delay between recipients:
   - `WA_DELAY_MIN_MS`
   - `WA_DELAY_MAX_MS`
+- Durable batch jobs are available:
+  - `POST /api/notifications/whatsapp/jobs` (create/start)
+  - `GET /api/notifications/whatsapp/jobs/{jobId}` (status)
+  - `POST /api/notifications/whatsapp/jobs/{jobId}/pause`
+  - `POST /api/notifications/whatsapp/jobs/{jobId}/resume`
+
+## Reliability test checklist (200/300 sends)
+
+1. Prepare 200-300 guests in dashboard (or import from Excel).
+2. Start a WhatsApp job from dashboard.
+3. During sending, force a transient issue (disconnect internet for ~20-40 seconds).
+4. Verify job enters paused/retry behavior and does not lose progress.
+5. Resume job and verify only remaining recipients are processed.
+6. Confirm final counters in UI/API:
+   - `processedCount = sentCount + failedCount`
+   - no duplicate sends for already `sent` recipients.
+
+Run retry policy unit tests:
+```bash
+npm run test --prefix backend
+```
 
 ## Public RSVP behavior (Vercel)
 
