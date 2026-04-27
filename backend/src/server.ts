@@ -13,27 +13,15 @@ import {
   deleteGroupInWedding,
   ensureGuestRsvpSlug,
   ensureGuestRsvpToken,
-  findActiveWhatsAppSendJob,
   findGuestById,
   findGuestByPhone,
   findGuestByRsvpSlug,
-  findWhatsAppSendJobByIdempotencyKey,
-  getNextWhatsAppSendRecipient,
-  getWhatsAppRetryRecipientCount,
-  getWhatsAppSendJob,
   getGuestsByWeddingId,
   getGroupsByWeddingId,
   importGuestsToWedding,
-  claimWhatsAppSendJobLease,
-  createWhatsAppSendJobInWedding,
-  releaseWhatsAppSendJobLease,
-  updateWhatsAppSendJob,
-  updateWhatsAppSendRecipient,
   updateGuestInWedding,
 } from './firestoreService';
 import { normalizePhoneForComparison, formatPhoneForWhatsApp } from './phoneUtils';
-import type { WhatsAppSendJob, WhatsAppSendJobRecipient, WhatsAppSendJobStatus } from '../../shared/types';
-import { computeRetryDelayMs, isTransientWhatsAppError } from './whatsappRetry';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -188,6 +176,19 @@ type WhatsAppProgressState = {
 type ProgressEvent = 'started' | 'progress' | 'completed' | 'error';
 
 const whatsappProgressStreams = new Map<string, Response>();
+type WhatsAppBatchSessionState = {
+  id: string;
+  weddingId: string;
+  createdAt: string;
+  updatedAt: string;
+  inProgress: boolean;
+  targetGuestIds: Set<string>;
+  sentGuestIds: Set<string>;
+  failedGuestIds: Set<string>;
+  lastError: string | null;
+};
+const whatsappBatchSessions = new Map<string, WhatsAppBatchSessionState>();
+const lastBatchSessionIdByWedding = new Map<string, string>();
 
 const isValidStatus = (value: unknown): value is GuestStatus =>
   typeof value === 'string' && statuses.includes(value as GuestStatus);
@@ -249,265 +250,122 @@ const buildWhatsAppGuestMessage = (messageTemplate: string, guestName: string, s
     .replaceAll('{{link}}', singleGuestLink);
 };
 
-type SendJobStartPayload = {
-  messageTemplate: string;
-  statusFilter: StatusFilter;
-  messageSentFilter: MessageSentFilter;
-  rsvpLink: string;
-  media?: { dataUrl?: string; fileName?: string } | null;
-  groupId?: string;
-  selectedGuestIds?: string[];
-  progressSessionId?: string;
-  idempotencyKey?: string;
-};
-
-const JOB_LEASE_MS = Number(process.env.WA_JOB_LEASE_MS ?? 45000);
-const MAX_RETRY_ATTEMPTS = Number(process.env.WA_MAX_RETRY_ATTEMPTS ?? 3);
-const RETRY_BACKOFF_BASE_MS = Number(process.env.WA_RETRY_BACKOFF_BASE_MS ?? 5000);
-const RETRY_BACKOFF_CAP_MS = Number(process.env.WA_RETRY_BACKOFF_CAP_MS ?? 120000);
-const runningJobById = new Set<string>();
-
-const emitJobProgress = (job: WhatsAppSendJob) => {
-  if (!job.progressSessionId) {
-    return;
-  }
-  emitProgressEvent(job.progressSessionId, 'progress', {
-    totalRecipients: job.totalRecipients,
-    processedCount: job.processedCount,
-    sentCount: job.sentCount,
-    failedCount: job.failedCount,
-    currentGuestId: job.currentGuestId ?? null,
-  });
-};
-
-const startProgressForJob = (job: WhatsAppSendJob) => {
-  if (!job.progressSessionId) {
-    return;
-  }
-  emitProgressEvent(job.progressSessionId, 'started', {
-    totalRecipients: job.totalRecipients,
-    processedCount: job.processedCount,
-    sentCount: job.sentCount,
-    failedCount: job.failedCount,
-    currentGuestId: job.currentGuestId ?? null,
-  });
-};
-
-const completeProgressForJob = (job: WhatsAppSendJob, event: 'completed' | 'error') => {
-  if (!job.progressSessionId) {
-    return;
-  }
-  if (event === 'completed') {
-    emitProgressEvent(job.progressSessionId, 'completed', {
-      totalRecipients: job.totalRecipients,
-      processedCount: job.processedCount,
-      sentCount: job.sentCount,
-      failedCount: job.failedCount,
-      currentGuestId: null,
-    });
-    return;
-  }
-  emitProgressEvent(job.progressSessionId, 'error', {
-    message: job.lastError ?? 'Unknown error',
-  });
-};
-
-const processRecipientInJob = async (
-  weddingId: string,
-  job: WhatsAppSendJob,
-  recipient: WhatsAppSendJobRecipient,
-  transientFailureStreak: number
-): Promise<{ updatedJob: WhatsAppSendJob; transientFailureStreak: number }> => {
-  const whatsappSession = getOrCreateWhatsAppSession(DEFAULT_WEDDING_ID);
-  if (!whatsappSession.isReady) {
-    const paused = await updateWhatsAppSendJob(weddingId, job.id, {
-      status: 'paused',
-      pausedAt: new Date().toISOString(),
-      lastError: 'WhatsApp client disconnected during sending.',
-      currentGuestId: null,
-    });
-    if (!paused) {
-      throw new Error('Failed to pause disconnected job.');
-    }
-    throw new Error('WhatsAppDisconnected');
-  }
-
-  const token = (await ensureGuestRsvpToken(weddingId, recipient.guestId)) ?? '';
-  const slug = RSVP_SHORT_LINKS_ENABLED ? await ensureGuestRsvpSlug(weddingId, recipient.guestId) : null;
-  const singleGuestLink = buildGuestRsvpUrl(
-    job.rsvpLink.replace(/\/$/, ''),
+const createBatchSession = (weddingId: string): WhatsAppBatchSessionState => {
+  const now = new Date().toISOString();
+  const session: WhatsAppBatchSessionState = {
+    id: randomUUID(),
     weddingId,
-    recipient.guestId,
-    token,
-    slug
-  );
-  const text = buildWhatsAppGuestMessage(job.messageTemplate, recipient.guestName, singleGuestLink);
-  const formattedPhone = formatPhoneForWhatsApp(recipient.phoneNumber);
-  const attempt = recipient.attempts + 1;
-  const lastAttemptAt = new Date().toISOString();
-  let messageMedia: MessageMedia | null = null;
-  if (job.mediaDataUrl) {
-    const mediaMatch = job.mediaDataUrl.match(/^data:(.+);base64,(.+)$/);
-    if (mediaMatch) {
-      const [, mimetype, base64Data] = mediaMatch;
-      messageMedia = new MessageMedia(mimetype, base64Data, job.mediaFileName || 'attachment');
-    }
-  }
-
-  let nextJob = await updateWhatsAppSendJob(weddingId, job.id, {
-    currentGuestId: recipient.guestId,
-  });
-  if (!nextJob) {
-    throw new Error('Failed to lock current guest.');
-  }
-
-  try {
-    if (messageMedia) {
-      await whatsappSession.client.sendMessage(formattedPhone, messageMedia, {
-        caption: text,
-        linkPreview: true,
-      });
-    } else {
-      await whatsappSession.client.sendMessage(formattedPhone, text, { linkPreview: true });
-    }
-    await updateGuestInWedding(weddingId, recipient.guestId, {
-      messageSent: true,
-      lastMessageSentAt: new Date().toISOString(),
-    });
-    await updateWhatsAppSendRecipient(weddingId, job.id, recipient.id, {
-      status: 'sent',
-      attempts: attempt,
-      sentAt: new Date().toISOString(),
-      lastAttemptAt,
-    });
-    nextJob = await updateWhatsAppSendJob(weddingId, job.id, {
-      sentCount: job.sentCount + 1,
-      processedCount: job.processedCount + 1,
-      lastProcessedGuestId: recipient.guestId,
-      currentGuestId: null,
-      status: 'running',
-    });
-    if (!nextJob) {
-      throw new Error('Failed to update successful progress.');
-    }
-    emitJobProgress(nextJob);
-    return { updatedJob: nextJob, transientFailureStreak: 0 };
-  } catch (error) {
-    const transient = isTransientWhatsAppError(error);
-    const isRetryable = transient && attempt < Math.max(1, MAX_RETRY_ATTEMPTS);
-    if (isRetryable) {
-      const retryDelay = computeRetryDelayMs(attempt, RETRY_BACKOFF_BASE_MS, RETRY_BACKOFF_CAP_MS);
-      await updateWhatsAppSendRecipient(weddingId, job.id, recipient.id, {
-        status: 'retry',
-        attempts: attempt,
-        nextRetryAt: new Date(Date.now() + retryDelay).toISOString(),
-        lastError: error instanceof Error ? error.message : 'Unknown retryable error',
-        lastAttemptAt,
-      });
-      const resumed = await updateWhatsAppSendJob(weddingId, job.id, {
-        currentGuestId: null,
-        status: 'running',
-        lastError: error instanceof Error ? error.message : 'Unknown retryable error',
-      });
-      if (!resumed) {
-        throw new Error('Failed to update retry state.');
-      }
-      emitJobProgress(resumed);
-      return {
-        updatedJob: resumed,
-        transientFailureStreak: transient ? transientFailureStreak + 1 : transientFailureStreak,
-      };
-    }
-    await updateWhatsAppSendRecipient(weddingId, job.id, recipient.id, {
-      status: 'failed',
-      attempts: attempt,
-      lastError: error instanceof Error ? error.message : 'Unknown non-retryable error',
-      lastAttemptAt,
-    });
-    nextJob = await updateWhatsAppSendJob(weddingId, job.id, {
-      failedCount: job.failedCount + 1,
-      processedCount: job.processedCount + 1,
-      lastProcessedGuestId: recipient.guestId,
-      currentGuestId: null,
-      status: 'running',
-      lastError: error instanceof Error ? error.message : 'Unknown non-retryable error',
-    });
-    if (!nextJob) {
-      throw new Error('Failed to update failed progress.');
-    }
-    emitJobProgress(nextJob);
-    return { updatedJob: nextJob, transientFailureStreak: transient ? transientFailureStreak + 1 : 0 };
-  }
+    createdAt: now,
+    updatedAt: now,
+    inProgress: false,
+    targetGuestIds: new Set<string>(),
+    sentGuestIds: new Set<string>(),
+    failedGuestIds: new Set<string>(),
+    lastError: null,
+  };
+  whatsappBatchSessions.set(session.id, session);
+  lastBatchSessionIdByWedding.set(weddingId, session.id);
+  return session;
 };
 
-const runWhatsAppJob = async (weddingId: string, jobId: string) => {
-  if (runningJobById.has(jobId)) {
-    return;
-  }
-  runningJobById.add(jobId);
-  const owner = `runner-${randomUUID()}`;
-  let transientFailureStreak = 0;
-
-  try {
-    while (true) {
-      const lease = await claimWhatsAppSendJobLease(weddingId, jobId, owner, JOB_LEASE_MS);
-      if (!lease) {
-        return;
-      }
-      const job = await getWhatsAppSendJob(weddingId, jobId);
-      if (!job) {
-        return;
-      }
-      if (job.status === 'paused' || job.status === 'completed' || job.status === 'completed_with_failures') {
-        completeProgressForJob(job, 'completed');
-        return;
-      }
-
-      const recipient = await getNextWhatsAppSendRecipient(weddingId, job.id);
-      if (!recipient) {
-        const retries = await getWhatsAppRetryRecipientCount(weddingId, job.id);
-        if (retries > 0) {
-          await sleep(Math.min(3000, getRandomDelayMs()));
-          continue;
-        }
-        const finalStatus: WhatsAppSendJobStatus = job.failedCount > 0 ? 'completed_with_failures' : 'completed';
-        const done = await updateWhatsAppSendJob(weddingId, job.id, {
-          status: finalStatus,
-          completedAt: new Date().toISOString(),
-          currentGuestId: null,
-        });
-        if (done) {
-          completeProgressForJob(done, 'completed');
-        }
-        return;
-      }
-
-      if (job.status !== 'running') {
-        await updateWhatsAppSendJob(weddingId, job.id, {
-          status: 'running',
-          startedAt: job.startedAt ?? new Date().toISOString(),
-        });
-      }
-
-      const result = await processRecipientInJob(weddingId, job, recipient, transientFailureStreak);
-      transientFailureStreak = result.transientFailureStreak;
-      const adaptiveDelay = Math.min(30000, transientFailureStreak * 2000);
-      await sleep(getRandomDelayMs() + adaptiveDelay);
+const resolveBatchSession = (
+  weddingId: string,
+  options: { continueFromSessionId?: string; continueFromLastSession?: boolean }
+): WhatsAppBatchSessionState | null => {
+  const requestedSessionId = String(options.continueFromSessionId ?? '').trim();
+  if (requestedSessionId) {
+    const existing = whatsappBatchSessions.get(requestedSessionId);
+    if (existing && existing.weddingId === weddingId) {
+      return existing;
     }
-  } catch (error) {
-    const failed = await updateWhatsAppSendJob(weddingId, jobId, {
-      status: 'paused',
-      pausedAt: new Date().toISOString(),
-      currentGuestId: null,
-      lastError: error instanceof Error ? error.message : 'Unknown job error',
-    });
-    if (failed) {
-      completeProgressForJob(failed, 'error');
-    }
-  } finally {
-    await releaseWhatsAppSendJobLease(weddingId, jobId, owner);
-    runningJobById.delete(jobId);
+    return null;
   }
+  if (options.continueFromLastSession) {
+    const lastId = lastBatchSessionIdByWedding.get(weddingId);
+    if (!lastId) {
+      return null;
+    }
+    const existing = whatsappBatchSessions.get(lastId);
+    if (existing && existing.weddingId === weddingId) {
+      return existing;
+    }
+  }
+  return null;
+};
+
+const sendWhatsAppBatch = async (
+  client: Client,
+  weddingId: string,
+  guestsToNotify: Guest[],
+  messageTemplate: string,
+  rsvpLink: string,
+  media?: { dataUrl: string; fileName?: string } | null,
+  session?: WhatsAppBatchSessionState,
+  onProgress?: (state: WhatsAppProgressState) => void
+): Promise<{ sentCount: number; failedCount: number }> => {
+  let sentCount = 0;
+  let failedCount = 0;
+  let processedCount = 0;
+  let messageMedia: MessageMedia | null = null;
+
+  if (media?.dataUrl) {
+    const mediaMatch = media.dataUrl.match(/^data:(.+);base64,(.+)$/);
+    if (!mediaMatch) {
+      throw new Error('Invalid media dataUrl format.');
+    }
+    const [, mimetype, base64Data] = mediaMatch;
+    messageMedia = new MessageMedia(mimetype, base64Data, media.fileName || 'attachment');
+  }
+
+  const rsvpBase = rsvpLink.replace(/\/$/, '');
+  for (const [index, guest] of guestsToNotify.entries()) {
+    const token = (await ensureGuestRsvpToken(weddingId, guest.id)) ?? '';
+    const slug = RSVP_SHORT_LINKS_ENABLED ? await ensureGuestRsvpSlug(weddingId, guest.id) : null;
+    const singleGuestLink = buildGuestRsvpUrl(rsvpBase, weddingId, guest.id, token, slug);
+    const text = buildWhatsAppGuestMessage(messageTemplate, guest.name, singleGuestLink);
+    const formattedPhone = formatPhoneForWhatsApp(guest.phoneNumber);
+
+    try {
+      if (messageMedia) {
+        await client.sendMessage(formattedPhone, messageMedia, { caption: text, linkPreview: true });
+      } else {
+        await client.sendMessage(formattedPhone, text, { linkPreview: true });
+      }
+      await updateGuestInWedding(weddingId, guest.id, {
+        messageSent: true,
+        lastMessageSentAt: new Date().toISOString(),
+      });
+      if (session) {
+        session.sentGuestIds.add(guest.id);
+        session.failedGuestIds.delete(guest.id);
+      }
+      sentCount += 1;
+    } catch (error) {
+      if (session) {
+        session.failedGuestIds.add(guest.id);
+        session.lastError = error instanceof Error ? error.message : 'Unknown send error';
+      }
+      failedCount += 1;
+      console.error(`WhatsApp send failed for guest ${guest.id}:`, error);
+    }
+
+    processedCount += 1;
+    if (onProgress) {
+      onProgress({
+        totalRecipients: guestsToNotify.length,
+        processedCount,
+        sentCount,
+        failedCount,
+        currentGuestId: guest.id,
+      });
+    }
+
+    if (index < guestsToNotify.length - 1) {
+      const delayMs = getRandomDelayMs();
+      await sleep(delayMs);
+    }
+  }
+  return { sentCount, failedCount };
 };
 
 app.get('/api/notifications/whatsapp/progress/:sessionId', (req, res) => {
@@ -822,7 +680,7 @@ app.post('/api/notifications/trigger', async (_req, res) => {
   });
 });
 
-const createWhatsAppSendJob = async (payload: SendJobStartPayload) => {
+app.post('/api/notifications/whatsapp', async (req, res) => {
   const {
     messageTemplate,
     statusFilter,
@@ -832,173 +690,171 @@ const createWhatsAppSendJob = async (payload: SendJobStartPayload) => {
     messageSentFilter,
     selectedGuestIds,
     progressSessionId,
-    idempotencyKey,
-  } = payload;
+    continueFromSessionId,
+    continueFromLastSession,
+  } = req.body as {
+    messageTemplate?: string;
+    statusFilter?: StatusFilter;
+    rsvpLink?: string;
+    media?: { dataUrl?: string; fileName?: string } | null;
+    groupId?: string;
+    messageSentFilter?: MessageSentFilter;
+    selectedGuestIds?: string[];
+    progressSessionId?: string;
+    continueFromSessionId?: string;
+    continueFromLastSession?: boolean;
+  };
+
+  const whatsappSession = getOrCreateWhatsAppSession(DEFAULT_WEDDING_ID);
+  if (!whatsappSession.isReady) {
+    return res.status(503).json({
+      message: 'WhatsApp client is not ready for this user. Please scan your personal QR first.',
+    });
+  }
+
   if (
     !messageTemplate?.trim() ||
     !rsvpLink?.trim() ||
     !isValidStatusFilter(statusFilter) ||
     !isValidMessageSentFilter(messageSentFilter)
   ) {
-    throw new Error('messageTemplate, rsvpLink, valid statusFilter, and valid messageSentFilter are required.');
+    return res.status(400).json({
+      message: 'messageTemplate, rsvpLink, valid statusFilter, and valid messageSentFilter are required.',
+    });
   }
   const trimmedTemplate = messageTemplate.trim();
   if (!trimmedTemplate.includes('{{link}}') && !trimmedTemplate.includes(RSVP_LINK_HERE_PLACEHOLDER)) {
-    throw new Error('messageTemplate must include {{link}} or {{link_here}} so each guest gets their personal RSVP URL.');
+    return res.status(400).json({
+      message: 'messageTemplate must include {{link}} or {{link_here}} so each guest gets their personal RSVP URL.',
+    });
   }
   if (media && typeof media.dataUrl !== 'string') {
-    throw new Error('media.dataUrl must be a base64 data URL string.');
+    return res.status(400).json({
+      message: 'media.dataUrl must be a base64 data URL string.',
+    });
   }
+  const normalizedMedia =
+    media && typeof media.dataUrl === 'string'
+      ? { dataUrl: media.dataUrl, fileName: media.fileName }
+      : null;
+
   const weddingId = DEFAULT_WEDDING_ID;
-  const activeJob = await findActiveWhatsAppSendJob(weddingId);
-  if (activeJob) {
-    const incomingSessionId = typeof progressSessionId === 'string' ? progressSessionId.trim() : '';
-    if (incomingSessionId && activeJob.progressSessionId !== incomingSessionId) {
-      const rebound = await updateWhatsAppSendJob(weddingId, activeJob.id, {
-        progressSessionId: incomingSessionId,
-      });
-      if (rebound) {
-        emitJobProgress(rebound);
-        return { reused: true, job: rebound };
-      }
-    }
-    return { reused: true, job: activeJob };
+  let batchSession = resolveBatchSession(weddingId, {
+    continueFromSessionId,
+    continueFromLastSession: Boolean(continueFromLastSession),
+  });
+  if ((continueFromLastSession || continueFromSessionId) && !batchSession) {
+    return res.status(400).json({
+      message: 'Requested continuation session was not found on this server.',
+    });
   }
-  const dedupeKey = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : '';
-  if (dedupeKey) {
-    const existing = await findWhatsAppSendJobByIdempotencyKey(weddingId, dedupeKey);
-    if (existing) {
-      return { reused: true, job: existing };
-    }
+  if (!batchSession) {
+    batchSession = createBatchSession(weddingId);
+  }
+  if (batchSession.inProgress) {
+    return res.status(409).json({
+      message: 'This batch session is already running.',
+      batchSessionId: batchSession.id,
+    });
   }
 
   const allGuests = await getGuestsByWeddingId(weddingId);
   const statusFiltered = filterGuestsByStatus(allGuests, statusFilter);
   const groupFiltered = filterGuestsByGroup(statusFiltered, groupId);
   const sentFiltered = filterGuestsByMessageSent(groupFiltered, messageSentFilter);
-  const guestsToNotify = filterGuestsBySelectedIds(sentFiltered, selectedGuestIds);
+  let guestsToNotify = filterGuestsBySelectedIds(sentFiltered, selectedGuestIds);
+  if (continueFromLastSession || continueFromSessionId) {
+    if (batchSession.targetGuestIds.size === 0) {
+      return res.status(400).json({
+        message: 'Continuation session has no saved target recipients.',
+        batchSessionId: batchSession.id,
+      });
+    }
+    guestsToNotify = allGuests.filter(
+      (guest) => batchSession.targetGuestIds.has(guest.id) && !batchSession.sentGuestIds.has(guest.id)
+    );
+  } else {
+    batchSession.targetGuestIds = new Set(guestsToNotify.map((guest) => guest.id));
+  }
+  console.log('Incoming WhatsApp notification request:', {
+    statusFilter,
+    groupId: groupId ?? null,
+    messageSentFilter,
+    selectedGuestIdsCount: Array.isArray(selectedGuestIds) ? selectedGuestIds.length : 0,
+    recipients: guestsToNotify.length,
+  });
+
   if (guestsToNotify.length === 0) {
-    throw new Error('No guests match the selected filters.');
-  }
-
-  const job = await createWhatsAppSendJobInWedding(weddingId, {
-    messageTemplate: trimmedTemplate,
-    rsvpLink: rsvpLink.trim(),
-    mediaDataUrl: media?.dataUrl,
-    mediaFileName: media?.fileName,
-    progressSessionId: typeof progressSessionId === 'string' ? progressSessionId.trim() : '',
-    idempotencyKey: dedupeKey || undefined,
-    filters: {
-      statusFilter,
-      messageSentFilter,
-      groupId: groupId ?? undefined,
-      selectedGuestIds: Array.isArray(selectedGuestIds) ? selectedGuestIds : undefined,
-    },
-    recipients: guestsToNotify.map((guest) => ({
-      id: guest.id,
-      name: guest.name,
-      phoneNumber: guest.phoneNumber,
-    })),
-  });
-  startProgressForJob(job);
-  void runWhatsAppJob(weddingId, job.id);
-  return { reused: false, job };
-};
-
-app.post('/api/notifications/whatsapp/jobs', async (req, res) => {
-  const whatsappSession = getOrCreateWhatsAppSession(DEFAULT_WEDDING_ID);
-  if (!whatsappSession.isReady) {
-    return res.status(503).json({
-      message: 'WhatsApp client is not ready for this user. Please scan your personal QR first.',
+    return res.status(400).json({
+      message:
+        continueFromLastSession || continueFromSessionId
+          ? 'No remaining unsent guests were found for this continuation session.'
+          : 'No guests match the selected filters.',
+      batchSessionId: batchSession.id,
     });
   }
+
+  const trimmedSessionId = typeof progressSessionId === 'string' ? progressSessionId.trim() : '';
+  if (trimmedSessionId) {
+    emitProgressEvent(trimmedSessionId, 'started', {
+      totalRecipients: guestsToNotify.length,
+      processedCount: 0,
+      sentCount: 0,
+      failedCount: 0,
+      currentGuestId: null,
+    });
+  }
+
+  batchSession.inProgress = true;
+  batchSession.updatedAt = new Date().toISOString();
   try {
-    const result = await createWhatsAppSendJob(req.body as SendJobStartPayload);
-    return res.status(result.reused ? 200 : 201).json({
-      message: result.reused ? 'Reusing existing active WhatsApp job.' : 'WhatsApp job created.',
-      job: result.job,
+    const { sentCount, failedCount } = await sendWhatsAppBatch(
+      whatsappSession.client,
+      weddingId,
+      guestsToNotify,
+      messageTemplate.trim(),
+      rsvpLink.trim(),
+      normalizedMedia,
+      batchSession,
+      (state) => {
+        if (trimmedSessionId) {
+          emitProgressEvent(trimmedSessionId, 'progress', state);
+        }
+      }
+    );
+    if (trimmedSessionId) {
+      emitProgressEvent(trimmedSessionId, 'completed', {
+        totalRecipients: guestsToNotify.length,
+        processedCount: guestsToNotify.length,
+        sentCount,
+        failedCount,
+        currentGuestId: null,
+      });
+    }
+    return res.json({
+      message: 'WhatsApp notifications sent successfully.',
+      queuedCount: 0,
+      sentCount,
+      failedCount,
+      batchSessionId: batchSession.id,
+      totalSentInSession: batchSession.sentGuestIds.size,
+      remainingUnsentInSession: Math.max(0, guestsToNotify.length - sentCount),
     });
   } catch (error) {
-    return res.status(400).json({
-      message: error instanceof Error ? error.message : 'Failed to create WhatsApp send job.',
+    batchSession.lastError = error instanceof Error ? error.message : 'Unknown error';
+    if (trimmedSessionId) {
+      emitProgressEvent(trimmedSessionId, 'error', {
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+    return res.status(500).json({
+      message: 'Failed to send WhatsApp notifications.',
+      error: error instanceof Error ? error.message : 'Unknown error',
+      batchSessionId: batchSession.id,
     });
-  }
-});
-
-app.get('/api/notifications/whatsapp/jobs/:jobId', async (req, res) => {
-  const jobId = String(req.params.jobId ?? '').trim();
-  if (!jobId) {
-    return res.status(400).json({ message: 'jobId is required.' });
-  }
-  const job = await getWhatsAppSendJob(DEFAULT_WEDDING_ID, jobId);
-  if (!job) {
-    return res.status(404).json({ message: 'WhatsApp job not found.' });
-  }
-  return res.json(job);
-});
-
-app.post('/api/notifications/whatsapp/jobs/:jobId/pause', async (req, res) => {
-  const jobId = String(req.params.jobId ?? '').trim();
-  if (!jobId) {
-    return res.status(400).json({ message: 'jobId is required.' });
-  }
-  const job = await updateWhatsAppSendJob(DEFAULT_WEDDING_ID, jobId, {
-    status: 'paused',
-    pausedAt: new Date().toISOString(),
-    currentGuestId: null,
-  });
-  if (!job) {
-    return res.status(404).json({ message: 'WhatsApp job not found.' });
-  }
-  emitJobProgress(job);
-  return res.json({ message: 'WhatsApp job paused.', job });
-});
-
-app.post('/api/notifications/whatsapp/jobs/:jobId/resume', async (req, res) => {
-  const jobId = String(req.params.jobId ?? '').trim();
-  if (!jobId) {
-    return res.status(400).json({ message: 'jobId is required.' });
-  }
-  const whatsappSession = getOrCreateWhatsAppSession(DEFAULT_WEDDING_ID);
-  if (!whatsappSession.isReady) {
-    return res.status(503).json({
-      message: 'WhatsApp client is not ready for this user. Please scan your personal QR first.',
-    });
-  }
-  const job = await updateWhatsAppSendJob(DEFAULT_WEDDING_ID, jobId, {
-    status: 'running',
-    pausedAt: null,
-    lastError: '',
-  });
-  if (!job) {
-    return res.status(404).json({ message: 'WhatsApp job not found.' });
-  }
-  emitJobProgress(job);
-  void runWhatsAppJob(DEFAULT_WEDDING_ID, job.id);
-  return res.json({ message: 'WhatsApp job resumed.', job });
-});
-
-app.post('/api/notifications/whatsapp', async (req, res) => {
-  const whatsappSession = getOrCreateWhatsAppSession(DEFAULT_WEDDING_ID);
-  if (!whatsappSession.isReady) {
-    return res.status(503).json({
-      message: 'WhatsApp client is not ready for this user. Please scan your personal QR first.',
-    });
-  }
-  try {
-    const result = await createWhatsAppSendJob(req.body as SendJobStartPayload);
-    return res.status(result.reused ? 200 : 201).json({
-      message: 'WhatsApp notifications job accepted.',
-      queuedCount: result.job.totalRecipients - result.job.processedCount,
-      sentCount: result.job.sentCount,
-      failedCount: result.job.failedCount,
-      jobId: result.job.id,
-      status: result.job.status,
-    });
-  } catch (error) {
-    return res.status(400).json({
-      message: error instanceof Error ? error.message : 'Failed to send WhatsApp notifications.',
-    });
+  } finally {
+    batchSession.inProgress = false;
+    batchSession.updatedAt = new Date().toISOString();
   }
 });
 
