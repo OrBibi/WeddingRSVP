@@ -25,6 +25,7 @@ const themeClassMap: Record<
     card: string;
     buttonPrimary: string;
     buttonSecondary: string;
+    modalAccent: string;
   }
 > = {
   floral: {
@@ -34,6 +35,7 @@ const themeClassMap: Record<
       'bg-wedding-charcoal text-wedding-champagne hover:shadow-wedding-gold/20 disabled:bg-slate-500 disabled:text-slate-200',
     buttonSecondary:
       'bg-wedding-gold text-wedding-charcoal hover:shadow-wedding-gold/30 disabled:bg-amber-200 disabled:text-slate-500',
+    modalAccent: 'text-wedding-charcoal',
   },
   ocean: {
     section: 'rsvp-theme-ocean',
@@ -42,6 +44,7 @@ const themeClassMap: Record<
       'bg-sky-900 text-sky-100 hover:shadow-sky-200/50 disabled:bg-slate-500 disabled:text-slate-200',
     buttonSecondary:
       'bg-sky-300 text-sky-950 hover:shadow-sky-300/40 disabled:bg-sky-100 disabled:text-slate-500',
+    modalAccent: 'text-sky-900',
   },
   classic: {
     section: 'rsvp-theme-classic',
@@ -50,7 +53,14 @@ const themeClassMap: Record<
       'bg-amber-900 text-amber-100 hover:shadow-amber-300/40 disabled:bg-slate-500 disabled:text-slate-200',
     buttonSecondary:
       'bg-amber-500 text-amber-950 hover:shadow-amber-300/40 disabled:bg-amber-200 disabled:text-slate-500',
+    modalAccent: 'text-amber-900',
   },
+};
+
+const successMessageByStatus: Record<GuestStatus, string> = {
+  Pending: 'הקישור נשאר זמין - כשתדע תעדכן אותנו',
+  Attending: 'איזה כיף! נתראה בחתונה',
+  'Not Attending': 'איזה באסה... אם תשנה את דעתך הקישור נשאר זמין',
 };
 
 export default function RSVP({ theme }: RSVPProps) {
@@ -71,6 +81,8 @@ export default function RSVP({ theme }: RSVPProps) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [confirmation, setConfirmation] = useState('');
+  const [thankYouMessage, setThankYouMessage] = useState('');
+  const [isThankYouOpen, setIsThankYouOpen] = useState(false);
   const selectedTheme = themeClassMap[theme];
 
   const loadDirectInvitation = async () => {
@@ -149,6 +161,8 @@ export default function RSVP({ theme }: RSVPProps) {
       setSelectedGuest(updated);
       setPartySize(String(updated.partySize ?? ''));
       setConfirmation('תודה! אישור ההגעה התקבל.');
+      setThankYouMessage(successMessageByStatus[updated.status]);
+      setIsThankYouOpen(true);
     } catch {
       setError('לא ניתן לעדכן את אישור ההגעה. נסו שוב.');
     } finally {
@@ -235,6 +249,27 @@ export default function RSVP({ theme }: RSVPProps) {
           {confirmation && <p className="mt-6 text-lg text-emerald-800 sm:text-xl">{confirmation}</p>}
         </div>
       </div>
+
+      {isThankYouOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
+          <div
+            aria-hidden="true"
+            className="absolute inset-0 bg-slate-900/45 backdrop-blur-[2px]"
+            onClick={() => setIsThankYouOpen(false)}
+          />
+          <div className="relative z-10 w-full max-w-md rounded-3xl border border-white/70 bg-white/95 p-7 text-center shadow-2xl sm:p-8">
+            <h3 className={`text-3xl font-semibold sm:text-4xl ${selectedTheme.modalAccent}`}>תודה על המענה</h3>
+            <p className="mt-4 text-lg leading-relaxed text-slate-700 sm:text-xl">{thankYouMessage}</p>
+            <button
+              className={`mt-7 w-full rounded-xl px-4 py-3 text-lg font-semibold transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg sm:text-xl ${selectedTheme.buttonSecondary}`}
+              onClick={() => setIsThankYouOpen(false)}
+              type="button"
+            >
+              סגור
+            </button>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
