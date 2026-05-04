@@ -14,6 +14,8 @@ export interface Guest {
   rsvpSlug?: string;
   messageSent?: boolean;
   lastMessageSentAt?: string;
+  /** ISO timestamp: last public RSVP or dashboard change to status / party sizes. */
+  rsvpResponseUpdatedAt?: string;
 }
 
 export interface GuestGroup {

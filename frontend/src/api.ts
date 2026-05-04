@@ -26,6 +26,7 @@ export interface AddGuestPayload {
   name: string;
   phoneNumber: string;
   partySize: number;
+  groupIds?: string[];
 }
 
 export interface ImportGuestPayload {
@@ -59,7 +60,9 @@ export interface WhatsAppNotificationPayload {
   statusFilter: NotificationStatusFilter;
   messageSentFilter: NotificationMessageSentFilter;
   rsvpLink: string;
+  /** @deprecated Prefer groupIds; if both are sent they are merged. */
   groupId?: string;
+  groupIds?: string[];
   selectedGuestIds?: string[];
   progressSessionId?: string;
   continueFromSessionId?: string;

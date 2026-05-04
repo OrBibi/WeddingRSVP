@@ -204,11 +204,15 @@ const filterGuestsByStatus = (guests: Guest[], statusFilter: StatusFilter) => {
   return guests.filter((guest) => guest.status === statusFilter);
 };
 
-const filterGuestsByGroup = (guests: Guest[], groupId?: string) => {
-  if (!groupId?.trim()) {
+const filterGuestsByAnyGroupIds = (guests: Guest[], groupIds: string[]) => {
+  const unique = [...new Set(groupIds.map((id) => id.trim()).filter(Boolean))];
+  if (unique.length === 0) {
     return guests;
   }
-  return guests.filter((guest) => Array.isArray(guest.groupIds) && guest.groupIds.includes(groupId));
+  const idSet = new Set(unique);
+  return guests.filter(
+    (guest) => Array.isArray(guest.groupIds) && guest.groupIds.some((gid) => idSet.has(gid))
+  );
 };
 
 const filterGuestsByMessageSent = (guests: Guest[], messageSentFilter: MessageSentFilter) => {
@@ -451,7 +455,7 @@ app.delete('/api/groups/:id', async (req, res) => {
 });
 
 app.post('/api/guests', async (req, res) => {
-  const { name, phoneNumber, partySize } = req.body as Partial<Guest>;
+  const { name, phoneNumber, partySize, groupIds } = req.body as Partial<Guest>;
   if (!name || !phoneNumber || typeof partySize !== 'number') {
     return res
       .status(400)
@@ -467,10 +471,27 @@ app.post('/api/guests', async (req, res) => {
     return res.status(409).json({ message: 'Phone number must be unique.' });
   }
 
+  if (typeof groupIds !== 'undefined' && !Array.isArray(groupIds)) {
+    return res.status(400).json({ message: 'groupIds must be an array.' });
+  }
+
+  const groupIdsList = Array.isArray(groupIds)
+    ? [...new Set(groupIds.filter((groupId): groupId is string => typeof groupId === 'string'))]
+    : [];
+  if (groupIdsList.length > 0) {
+    const groups = await getGroupsByWeddingId(DEFAULT_WEDDING_ID);
+    const groupIdsSet = new Set(groups.map((group) => group.id));
+    const hasInvalidGroup = groupIdsList.some((groupId) => !groupIdsSet.has(groupId));
+    if (hasInvalidGroup) {
+      return res.status(400).json({ message: 'One or more groupIds are invalid.' });
+    }
+  }
+
   const guest = await addGuestToWedding(DEFAULT_WEDDING_ID, {
     name: name.trim(),
     phoneNumber: phoneNumber.trim(),
     expectedPartySize: partySize,
+    groupIds: groupIdsList,
   });
   return res.status(201).json(guest);
 });
@@ -636,8 +657,9 @@ app.put('/api/guests/:phoneNumber', async (req, res) => {
     return res.status(400).json({ message: 'groupIds must be an array.' });
   }
 
-  if (newPhoneNumber && newPhoneNumber !== phoneNumber) {
-    const normalizedNewPhone = normalizePhoneForComparison(newPhoneNumber);
+  const trimmedNewPhone = typeof newPhoneNumber === 'string' ? newPhoneNumber.trim() : '';
+  if (trimmedNewPhone && trimmedNewPhone !== phoneNumber.trim()) {
+    const normalizedNewPhone = normalizePhoneForComparison(trimmedNewPhone);
     const hasConflict = allGuests.some(
       (guest) =>
         guest.phoneNumber !== phoneNumber &&
@@ -687,6 +709,7 @@ app.post('/api/notifications/whatsapp', async (req, res) => {
     rsvpLink,
     media,
     groupId,
+    groupIds: rawGroupIds,
     messageSentFilter,
     selectedGuestIds,
     progressSessionId,
@@ -698,12 +721,32 @@ app.post('/api/notifications/whatsapp', async (req, res) => {
     rsvpLink?: string;
     media?: { dataUrl?: string; fileName?: string } | null;
     groupId?: string;
+    groupIds?: string[];
     messageSentFilter?: MessageSentFilter;
     selectedGuestIds?: string[];
     progressSessionId?: string;
     continueFromSessionId?: string;
     continueFromLastSession?: boolean;
   };
+
+  const groupIdsForFilter = [
+    ...new Set(
+      [
+        ...(Array.isArray(rawGroupIds) ? rawGroupIds.filter((id): id is string => typeof id === 'string') : []),
+        ...(typeof groupId === 'string' && groupId.trim() ? [groupId.trim()] : []),
+      ].map((id) => id.trim())
+    ),
+  ].filter(Boolean);
+  if (typeof rawGroupIds !== 'undefined' && !Array.isArray(rawGroupIds)) {
+    return res.status(400).json({ message: 'groupIds must be an array when provided.' });
+  }
+  if (groupIdsForFilter.length > 0) {
+    const weddingGroups = await getGroupsByWeddingId(DEFAULT_WEDDING_ID);
+    const validIds = new Set(weddingGroups.map((g) => g.id));
+    if (groupIdsForFilter.some((id) => !validIds.has(id))) {
+      return res.status(400).json({ message: 'One or more groupIds are invalid.' });
+    }
+  }
 
   const whatsappSession = getOrCreateWhatsAppSession(DEFAULT_WEDDING_ID);
   if (!whatsappSession.isReady) {
@@ -760,7 +803,7 @@ app.post('/api/notifications/whatsapp', async (req, res) => {
 
   const allGuests = await getGuestsByWeddingId(weddingId);
   const statusFiltered = filterGuestsByStatus(allGuests, statusFilter);
-  const groupFiltered = filterGuestsByGroup(statusFiltered, groupId);
+  const groupFiltered = filterGuestsByAnyGroupIds(statusFiltered, groupIdsForFilter);
   const sentFiltered = filterGuestsByMessageSent(groupFiltered, messageSentFilter);
   let guestsToNotify = filterGuestsBySelectedIds(sentFiltered, selectedGuestIds);
   if (continueFromLastSession || continueFromSessionId) {
@@ -778,7 +821,7 @@ app.post('/api/notifications/whatsapp', async (req, res) => {
   }
   console.log('Incoming WhatsApp notification request:', {
     statusFilter,
-    groupId: groupId ?? null,
+    groupIds: groupIdsForFilter,
     messageSentFilter,
     selectedGuestIdsCount: Array.isArray(selectedGuestIds) ? selectedGuestIds.length : 0,
     recipients: guestsToNotify.length,

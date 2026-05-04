@@ -55,6 +55,78 @@ const newRsvpSlugCandidate = (): string =>
 
 const nowIso = () => new Date().toISOString();
 
+const normalizeOptionalIsoString = (value: unknown): string | undefined => {
+  if (typeof value !== 'string' || !value.trim()) {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return Number.isFinite(Date.parse(trimmed)) ? trimmed : undefined;
+};
+
+/** Firestore may return an ISO string or a Timestamp; normalize for API / sorting. */
+const guestRsvpResponseUpdatedAtFromDoc = (value: unknown): string | undefined => {
+  if (typeof value === 'string' && value.trim()) {
+    const t = Date.parse(value.trim());
+    return Number.isFinite(t) ? value.trim() : undefined;
+  }
+  if (value != null && typeof value === 'object') {
+    const o = value as {
+      toDate?: () => Date;
+      toMillis?: () => number;
+      seconds?: number;
+      nanoseconds?: number;
+      _seconds?: number;
+    };
+    if (typeof o.toDate === 'function') {
+      const d = o.toDate();
+      if (d instanceof Date && Number.isFinite(d.getTime())) {
+        return d.toISOString();
+      }
+    }
+    if (typeof o.toMillis === 'function') {
+      const ms = o.toMillis();
+      if (typeof ms === 'number' && Number.isFinite(ms)) {
+        return new Date(ms).toISOString();
+      }
+    }
+    const sec = typeof o.seconds === 'number' ? o.seconds : typeof o._seconds === 'number' ? o._seconds : undefined;
+    if (typeof sec === 'number' && Number.isFinite(sec)) {
+      const nano = typeof o.nanoseconds === 'number' ? o.nanoseconds : 0;
+      return new Date(sec * 1000 + nano / 1e6).toISOString();
+    }
+  }
+  return undefined;
+};
+
+/**
+ * Full-document `set` with a plain spread from Firestore can omit or mishandle fields.
+ * Build an explicit payload so `rsvpResponseUpdatedAt` is always persisted.
+ */
+const buildGuestDocumentForFirestore = (guest: Guest, rsvpStamp: string): Record<string, unknown> => {
+  const doc: Record<string, unknown> = {
+    id: guest.id,
+    weddingId: guest.weddingId,
+    name: guest.name,
+    phoneNumber: guest.phoneNumber,
+    status: guest.status,
+    expectedPartySize: Number(guest.expectedPartySize),
+    partySize: Number(guest.partySize),
+    groupIds: Array.isArray(guest.groupIds) ? guest.groupIds : [],
+    messageSent: Boolean(guest.messageSent),
+    rsvpResponseUpdatedAt: rsvpStamp,
+  };
+  if (typeof guest.rsvpToken === 'string' && guest.rsvpToken.trim()) {
+    doc.rsvpToken = guest.rsvpToken;
+  }
+  if (typeof guest.rsvpSlug === 'string' && guest.rsvpSlug.trim()) {
+    doc.rsvpSlug = guest.rsvpSlug;
+  }
+  if (typeof guest.lastMessageSentAt === 'string' && guest.lastMessageSentAt.trim()) {
+    doc.lastMessageSentAt = guest.lastMessageSentAt.trim();
+  }
+  return doc;
+};
+
 export const getGuestsByWeddingId = async (weddingId: string): Promise<Guest[]> => {
   const snapshot = await guestsCollection(weddingId).get();
   return snapshot.docs.map((doc) => {
@@ -64,6 +136,7 @@ export const getGuestsByWeddingId = async (weddingId: string): Promise<Guest[]> 
       groupIds: Array.isArray(data.groupIds) ? data.groupIds : [],
       messageSent: Boolean(data.messageSent),
       lastMessageSentAt: typeof data.lastMessageSentAt === 'string' ? data.lastMessageSentAt : undefined,
+      rsvpResponseUpdatedAt: guestRsvpResponseUpdatedAtFromDoc(data.rsvpResponseUpdatedAt),
     };
   });
 };
@@ -95,9 +168,10 @@ export const deleteGroupInWedding = async (weddingId: string, groupId: string): 
 
 export const addGuestToWedding = async (
   weddingId: string,
-  payload: { name: string; phoneNumber: string; expectedPartySize: number }
+  payload: { name: string; phoneNumber: string; expectedPartySize: number; groupIds?: string[] }
 ): Promise<Guest> => {
   const id = randomUUID();
+  const createdAt = nowIso();
   const guest: Guest = {
     id,
     weddingId,
@@ -106,9 +180,10 @@ export const addGuestToWedding = async (
     status: 'Pending',
     expectedPartySize: payload.expectedPartySize,
     partySize: payload.expectedPartySize,
-    groupIds: [],
+    groupIds: Array.isArray(payload.groupIds) ? [...new Set(payload.groupIds)] : [],
     rsvpToken: randomUUID(),
     messageSent: false,
+    rsvpResponseUpdatedAt: createdAt,
   };
   await guestsCollection(weddingId).doc(id).set(guest);
   const slug = await ensureGuestRsvpSlug(weddingId, id);
@@ -142,7 +217,11 @@ export const updateGuestInWedding = async (
   const updated: Guest = {
     ...current,
     ...updates,
-    groupIds: Array.isArray(current.groupIds) ? current.groupIds : [],
+    groupIds: Array.isArray(updates.groupIds)
+      ? [...new Set(updates.groupIds)]
+      : Array.isArray(current.groupIds)
+        ? current.groupIds
+        : [],
     messageSent: typeof updates.messageSent === 'boolean' ? updates.messageSent : Boolean(current.messageSent),
     lastMessageSentAt:
       typeof updates.lastMessageSentAt === 'string'
@@ -151,8 +230,18 @@ export const updateGuestInWedding = async (
           ? current.lastMessageSentAt
           : undefined,
   };
-  await guestRef.set(updated);
-  return updated;
+
+  const rsvpStamp = nowIso();
+  updated.rsvpResponseUpdatedAt = rsvpStamp;
+
+  await guestRef.set(buildGuestDocumentForFirestore(updated, rsvpStamp));
+  return {
+    ...updated,
+    groupIds: Array.isArray(updated.groupIds) ? updated.groupIds : [],
+    messageSent: Boolean(updated.messageSent),
+    lastMessageSentAt: normalizeOptionalIsoString(updated.lastMessageSentAt),
+    rsvpResponseUpdatedAt: rsvpStamp,
+  };
 };
 
 export const deleteGuestInWedding = async (weddingId: string, guestId: string): Promise<Guest | null> => {
@@ -180,6 +269,7 @@ export const findGuestByPhone = async (weddingId: string, phoneNumber: string): 
     groupIds: Array.isArray(found.groupIds) ? found.groupIds : [],
     messageSent: Boolean(found.messageSent),
     lastMessageSentAt: typeof found.lastMessageSentAt === 'string' ? found.lastMessageSentAt : undefined,
+    rsvpResponseUpdatedAt: guestRsvpResponseUpdatedAtFromDoc(found.rsvpResponseUpdatedAt),
   };
 };
 
@@ -194,6 +284,7 @@ export const findGuestById = async (weddingId: string, guestId: string): Promise
     groupIds: Array.isArray(data.groupIds) ? data.groupIds : [],
     messageSent: Boolean(data.messageSent),
     lastMessageSentAt: typeof data.lastMessageSentAt === 'string' ? data.lastMessageSentAt : undefined,
+    rsvpResponseUpdatedAt: guestRsvpResponseUpdatedAtFromDoc(data.rsvpResponseUpdatedAt),
   };
 };
 
@@ -254,6 +345,7 @@ export const findGuestByRsvpSlug = async (weddingId: string, slug: string): Prom
     groupIds: Array.isArray(data.groupIds) ? data.groupIds : [],
     messageSent: Boolean(data.messageSent),
     lastMessageSentAt: typeof data.lastMessageSentAt === 'string' ? data.lastMessageSentAt : undefined,
+    rsvpResponseUpdatedAt: guestRsvpResponseUpdatedAtFromDoc(data.rsvpResponseUpdatedAt),
   };
 };
 
@@ -292,6 +384,7 @@ export const importGuestsToWedding = async (
       groupIds: Array.isArray(row.groupIds) ? [...new Set(row.groupIds)] : [],
       rsvpToken: randomUUID(),
       messageSent: false,
+      rsvpResponseUpdatedAt: nowIso(),
     };
     await guestsCollection(weddingId).doc(guest.id).set(guest);
     const slug = await ensureGuestRsvpSlug(weddingId, guest.id);
@@ -328,7 +421,7 @@ export const bulkUpdateGuestGroups = async (
         ? [...new Set([...currentGroupIds, groupId])]
         : currentGroupIds.filter((id) => id !== groupId);
 
-    batch.update(guestRef, { groupIds: nextGroupIds });
+    batch.update(guestRef, { groupIds: nextGroupIds, rsvpResponseUpdatedAt: nowIso() });
     updatedCount += 1;
   }
 

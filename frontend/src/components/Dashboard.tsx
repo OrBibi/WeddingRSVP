@@ -25,6 +25,7 @@ const defaultForm = {
   name: '',
   phoneNumber: '',
   partySize: 1,
+  groupIds: [] as string[],
 };
 
 const statusLabelMap: Record<Guest['status'], string> = {
@@ -33,15 +34,93 @@ const statusLabelMap: Record<Guest['status'], string> = {
   'Not Attending': 'לא מגיע',
 };
 
+/** Only explicit 1 counts as "in group"; empty, 0, or any other value means not in group. */
 const parseGroupExcelCell = (value: unknown): boolean => {
-  if (typeof value === 'number') {
-    return value !== 0;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value === 1;
   }
-  const text = String(value ?? '').trim().toLowerCase();
-  if (!text) {
-    return false;
+  const text = String(value ?? '').trim();
+  return text === '1';
+};
+
+type GuestTableStatusFilter = 'All' | Guest['status'];
+
+const filterGuestsByTableStatus = (guests: Guest[], statusFilter: GuestTableStatusFilter) => {
+  if (statusFilter === 'All') {
+    return guests;
   }
-  return ['1', 'true', 'yes', 'y', 'כן'].includes(text);
+  return guests.filter((guest) => guest.status === statusFilter);
+};
+
+const filterGuestsByAnyGroupIds = (guests: Guest[], groupIds: string[]) => {
+  const unique = [...new Set(groupIds.map((id) => id.trim()).filter(Boolean))];
+  if (unique.length === 0) {
+    return guests;
+  }
+  const idSet = new Set(unique);
+  return guests.filter(
+    (guest) => Array.isArray(guest.groupIds) && guest.groupIds.some((gid) => idSet.has(gid))
+  );
+};
+
+const RESERVED_IMPORT_HEADERS = new Set(
+  [
+    'שם האורח',
+    'שם',
+    'name',
+    'מספר פלאפון',
+    'מספר טלפון',
+    'phonenumber',
+    'כמות אורחים',
+    'כמות אורחים צפויה',
+    'expectedpartysize',
+    'סטטוס הגעה',
+    'status',
+  ].map((h) => h.toLowerCase())
+);
+
+const isReservedImportHeader = (key: string) => RESERVED_IMPORT_HEADERS.has(key.trim().toLowerCase());
+
+const filterGuestsByMessageSentFilter = (
+  guests: Guest[],
+  messageSentFilter: NotificationMessageSentFilter
+) => {
+  if (messageSentFilter === 'All') {
+    return guests;
+  }
+  if (messageSentFilter === 'Sent') {
+    return guests.filter((guest) => Boolean(guest.messageSent));
+  }
+  return guests.filter((guest) => !guest.messageSent);
+};
+
+type WhatsAppAudienceStatusFilter = 'All' | Guest['status'];
+
+const filterGuestsByWhatsAppStatus = (guests: Guest[], statusFilter: WhatsAppAudienceStatusFilter) => {
+  if (statusFilter === 'All') {
+    return guests;
+  }
+  return guests.filter((guest) => guest.status === statusFilter);
+};
+
+/** Missing or invalid timestamps sort last when ordering newest-first. */
+const responseUpdatedSortKey = (iso: string | undefined): number => {
+  if (!iso) {
+    return Number.NEGATIVE_INFINITY;
+  }
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
+};
+
+const formatGuestResponseUpdatedCell = (iso: string | undefined): string => {
+  if (!iso) {
+    return '—';
+  }
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) {
+    return '—';
+  }
+  return new Date(t).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' });
 };
 
 export default function Dashboard() {
@@ -59,7 +138,7 @@ export default function Dashboard() {
   const [notificationFilter, setNotificationFilter] = useState<'All' | Guest['status']>('All');
   const [notificationMessageSentFilter, setNotificationMessageSentFilter] =
     useState<NotificationMessageSentFilter>('All');
-  const [notificationGroupFilter, setNotificationGroupFilter] = useState('');
+  const [notificationGroupFilterIds, setNotificationGroupFilterIds] = useState<string[]>([]);
   const [notificationSelectedOnly, setNotificationSelectedOnly] = useState(false);
   const [notificationLink, setNotificationLink] = useState(
     import.meta.env.VITE_PUBLIC_RSVP_SITE_URL || 'http://localhost:5173'
@@ -75,8 +154,14 @@ export default function Dashboard() {
   const [importingGuests, setImportingGuests] = useState(false);
   const [downloadingTemplate, setDownloadingTemplate] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'All' | Guest['status'] | 'Maybe'>('All');
+  const [statusFilter, setStatusFilter] = useState<GuestTableStatusFilter>('All');
+  const [listGroupFilterIds, setListGroupFilterIds] = useState<string[]>([]);
+  const [listMessageSentFilter, setListMessageSentFilter] =
+    useState<NotificationMessageSentFilter>('All');
   const [sortByStatusDirection, setSortByStatusDirection] = useState<'asc' | 'desc'>('asc');
+  const [primaryGuestTableSort, setPrimaryGuestTableSort] = useState<'status' | 'responseUpdated'>('status');
+  const [sortByResponseDirection, setSortByResponseDirection] = useState<'desc' | 'asc'>('desc');
+  const [showWhatsAppRecipientsPreview, setShowWhatsAppRecipientsPreview] = useState(false);
   const [deletingPhone, setDeletingPhone] = useState<string | null>(null);
   const [selectedGuestIds, setSelectedGuestIds] = useState<Set<string>>(new Set());
   const [bulkGroupId, setBulkGroupId] = useState('');
@@ -114,24 +199,35 @@ export default function Dashboard() {
   );
   const filteredGuests = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    const byStatus = sortedGuests.filter((guest) => {
-      if (statusFilter === 'All') {
-        return true;
-      }
-      if (statusFilter === 'Maybe') {
-        return guest.status === 'Pending';
-      }
-      return guest.status === statusFilter;
-    });
+    let list = filterGuestsByTableStatus(sortedGuests, statusFilter);
+    list = filterGuestsByAnyGroupIds(list, listGroupFilterIds);
+    list = filterGuestsByMessageSentFilter(list, listMessageSentFilter);
 
     if (!query) {
-      return byStatus;
+      return list;
     }
-    return byStatus.filter(
+    return list.filter(
       (guest) =>
         guest.name.toLowerCase().includes(query) || guest.phoneNumber.toLowerCase().includes(query)
     );
-  }, [searchQuery, sortedGuests, statusFilter]);
+  }, [searchQuery, sortedGuests, statusFilter, listGroupFilterIds, listMessageSentFilter]);
+
+  const whatsAppRecipientsPreview = useMemo(() => {
+    let list = filterGuestsByWhatsAppStatus(guests, notificationFilter);
+    list = filterGuestsByAnyGroupIds(list, notificationGroupFilterIds);
+    list = filterGuestsByMessageSentFilter(list, notificationMessageSentFilter);
+    if (notificationSelectedOnly) {
+      list = list.filter((guest) => selectedGuestIds.has(guest.id));
+    }
+    return [...list].sort((a, b) => a.name.localeCompare(b.name));
+  }, [
+    guests,
+    notificationFilter,
+    notificationGroupFilterIds,
+    notificationMessageSentFilter,
+    notificationSelectedOnly,
+    selectedGuestIds,
+  ]);
 
   const statusSortOrder: Record<Guest['status'], number> = {
     Attending: 0,
@@ -140,11 +236,22 @@ export default function Dashboard() {
   };
 
   const visibleGuests = useMemo(() => {
+    if (primaryGuestTableSort === 'responseUpdated') {
+      const direction = sortByResponseDirection === 'desc' ? 1 : -1;
+      return [...filteredGuests].sort((a, b) => {
+        const ka = responseUpdatedSortKey(a.rsvpResponseUpdatedAt);
+        const kb = responseUpdatedSortKey(b.rsvpResponseUpdatedAt);
+        if (ka !== kb) {
+          return (kb - ka) * direction;
+        }
+        return a.name.localeCompare(b.name);
+      });
+    }
     return [...filteredGuests].sort((a, b) => {
       const direction = sortByStatusDirection === 'asc' ? 1 : -1;
       return (statusSortOrder[a.status] - statusSortOrder[b.status]) * direction;
     });
-  }, [filteredGuests, sortByStatusDirection]);
+  }, [filteredGuests, sortByStatusDirection, primaryGuestTableSort, sortByResponseDirection]);
 
   const totalInvitations = guests.length;
   const confirmedInvitations = guests.filter((guest) => guest.status === 'Attending').length;
@@ -173,11 +280,19 @@ export default function Dashboard() {
     try {
       const data = await fetchGuests();
       setGuests(
-        data.map((guest) => ({
-          ...guest,
-          groupIds: Array.isArray(guest.groupIds) ? guest.groupIds : [],
-          messageSent: Boolean(guest.messageSent),
-        }))
+        data.map((guest) => {
+          const rawAt = guest.rsvpResponseUpdatedAt;
+          const rsvpResponseUpdatedAt =
+            typeof rawAt === 'string' && rawAt.trim() && Number.isFinite(Date.parse(rawAt.trim()))
+              ? rawAt.trim()
+              : undefined;
+          return {
+            ...guest,
+            groupIds: Array.isArray(guest.groupIds) ? guest.groupIds : [],
+            messageSent: Boolean(guest.messageSent),
+            rsvpResponseUpdatedAt,
+          };
+        })
       );
     } catch {
       setError('לא ניתן לטעון את רשימת האורחים. בדקו שהשרת פועל.');
@@ -241,8 +356,16 @@ export default function Dashboard() {
         name: form.name.trim(),
         phoneNumber: form.phoneNumber.trim(),
         partySize: Number(form.partySize),
+        groupIds: [...new Set(form.groupIds)],
       });
-      setGuests((current) => [...current, created]);
+      setGuests((current) => [
+        ...current,
+        {
+          ...created,
+          groupIds: Array.isArray(created.groupIds) ? created.groupIds : [],
+          messageSent: Boolean(created.messageSent),
+        },
+      ]);
       setForm(defaultForm);
     } catch {
       setFormError('לא ניתן להוסיף אורח. ודאו שמספר הטלפון ייחודי.');
@@ -316,7 +439,7 @@ export default function Dashboard() {
         statusFilter: notificationFilter,
         messageSentFilter: notificationMessageSentFilter,
         rsvpLink: notificationLink.trim(),
-        groupId: notificationGroupFilter || undefined,
+        groupIds: notificationGroupFilterIds.length > 0 ? [...new Set(notificationGroupFilterIds)] : undefined,
         selectedGuestIds: notificationSelectedOnly ? [...selectedGuestIds] : undefined,
         progressSessionId,
         continueFromLastSession: continueFromLastBatch,
@@ -576,11 +699,52 @@ export default function Dashboard() {
       const firstSheet = workbook.Sheets[firstSheetName];
       const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(firstSheet, { defval: '' });
 
+      const allHeaderKeys = new Set<string>();
+      rows.forEach((row) => {
+        Object.keys(row).forEach((key) => allHeaderKeys.add(key));
+      });
+      const groupColumnKeys = [...allHeaderKeys]
+        .filter((key) => !isReservedImportHeader(key))
+        .sort((a, b) => a.localeCompare(b, 'he'));
+
+      const workingGroupNameToId = new Map(
+        groups.map((group) => [group.name.trim().toLowerCase(), group.id] as const)
+      );
+      const columnMappings: Array<{ rawKey: string; groupId: string }> = [];
+
+      for (const rawKey of groupColumnKeys) {
+        const displayName = rawKey.trim();
+        if (!displayName) {
+          continue;
+        }
+        const lower = displayName.toLowerCase();
+        let groupIdResolved = workingGroupNameToId.get(lower);
+        if (!groupIdResolved) {
+          try {
+            const created = await createGroup(displayName);
+            groupIdResolved = created.id;
+            workingGroupNameToId.set(created.name.trim().toLowerCase(), created.id);
+            setGroups((prev) => [...prev, created]);
+          } catch {
+            const refreshed = await fetchGroups();
+            setGroups(refreshed);
+            refreshed.forEach((g) => workingGroupNameToId.set(g.name.trim().toLowerCase(), g.id));
+            groupIdResolved = workingGroupNameToId.get(lower);
+          }
+        }
+        if (groupIdResolved) {
+          columnMappings.push({ rawKey, groupId: groupIdResolved });
+        }
+      }
+
       const importedGuests = rows
         .map((row) => {
-          const detectedGroupIds = groups
-            .filter((group) => parseGroupExcelCell(row[group.name]))
-            .map((group) => group.id);
+          const idSet = new Set<string>();
+          for (const { rawKey, groupId } of columnMappings) {
+            if (parseGroupExcelCell(row[rawKey])) {
+              idSet.add(groupId);
+            }
+          }
           return {
             name: String(row['שם האורח'] ?? row['שם'] ?? row['name'] ?? '').trim(),
             phoneNumber: String(
@@ -590,7 +754,7 @@ export default function Dashboard() {
               row['כמות אורחים'] ?? row['כמות אורחים צפויה'] ?? row['expectedPartySize'] ?? 0
             ),
             status: String(row['סטטוס הגעה'] ?? row['status'] ?? '').trim() || 'מתלבט',
-            groupIds: detectedGroupIds,
+            groupIds: [...idSet],
           };
         })
         .filter((row) => row.name && row.phoneNumber && row.expectedPartySize >= 1);
@@ -954,7 +1118,7 @@ export default function Dashboard() {
 
       <div className="rounded-2xl border border-stone-200 bg-white/95 p-4 shadow-lg backdrop-blur-sm sm:p-6">
         <h3 className="mb-4 text-lg font-semibold text-slate-800">הוסף אורח</h3>
-        <form className="grid grid-cols-1 gap-3 sm:grid-cols-4" onSubmit={addGuest}>
+        <form className="grid grid-cols-1 gap-3 sm:grid-cols-5" onSubmit={addGuest}>
           <input
             className="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-amber-500 focus:outline-none"
             onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
@@ -980,6 +1144,35 @@ export default function Dashboard() {
             type="number"
             value={form.partySize}
           />
+          <div className="rounded-lg border border-slate-200 px-3 py-2">
+            <p className="mb-2 text-xs font-medium text-slate-600">קבוצות (אופציונלי)</p>
+            <div className="flex max-h-20 flex-wrap gap-2 overflow-y-auto">
+              {groups.length === 0 ? (
+                <span className="text-xs text-slate-400">אין קבוצות מוגדרות</span>
+              ) : (
+                groups.map((group) => (
+                  <label className="inline-flex items-center gap-1 text-xs text-slate-700" key={group.id}>
+                    <input
+                      checked={form.groupIds.includes(group.id)}
+                      onChange={(event) =>
+                        setForm((current) => {
+                          const nextSet = new Set(current.groupIds);
+                          if (event.target.checked) {
+                            nextSet.add(group.id);
+                          } else {
+                            nextSet.delete(group.id);
+                          }
+                          return { ...current, groupIds: [...nextSet] };
+                        })
+                      }
+                      type="checkbox"
+                    />
+                    <span>{group.name}</span>
+                  </label>
+                ))
+              )}
+            </div>
+          </div>
           <button
             className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-900 disabled:cursor-not-allowed disabled:bg-slate-400"
             disabled={submittingGuest}
@@ -993,7 +1186,9 @@ export default function Dashboard() {
         <div className="mt-6 border-t border-stone-200 pt-4">
           <h4 className="mb-2 text-sm font-semibold text-slate-700">ייבוא רשימת מוזמנים מקובץ Excel</h4>
           <p className="mb-3 text-xs text-slate-500">
-            פורמט עמודות נדרש: שם האורח, מספר פלאפון, כמות אורחים, סטטוס הגעה (אם ריק ייחשב מתלבט)
+            עמודות נדרשות: שם האורח, מספר פלאפון, כמות אורחים, סטטוס הגעה (אם ריק ייחשב מתלבט). כל עמודה
+            נוספת ייחשבה כקבוצה (שם חדש ייווצר אוטומטית); בכל תא של קבוצה רק הערך 1 מסמן שיוך — ריק או כל ערך
+            אחר מסמנים שלא באותה קבוצה.
           </p>
           <div className="mb-3 flex flex-wrap gap-2">
             <button
@@ -1128,22 +1323,47 @@ export default function Dashboard() {
           </div>
 
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="wa-group-filter">
-              סינון לפי קבוצה (אופציונלי)
-            </label>
-            <select
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-amber-500 focus:outline-none"
-              id="wa-group-filter"
-              onChange={(event) => setNotificationGroupFilter(event.target.value)}
-              value={notificationGroupFilter}
-            >
-              <option value="">כל הקבוצות</option>
-              {groups.map((group) => (
-                <option key={group.id} value={group.id}>
-                  {group.name}
-                </option>
-              ))}
-            </select>
+            <p className="mb-1 text-sm font-medium text-slate-700">סינון לפי קבוצות (אופציונלי)</p>
+            <p className="mb-2 text-xs text-slate-500">
+              אורח יוצג אם הוא שייך לאחת מהקבוצות המסומנות. ללא סימון — כל הקבוצות.
+            </p>
+            <div className="max-h-28 overflow-y-auto rounded-lg border border-slate-200 bg-white px-3 py-2">
+              {groups.length === 0 ? (
+                <span className="text-xs text-slate-400">אין קבוצות מוגדרות</span>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {groups.map((group) => (
+                    <label className="inline-flex items-center gap-1 text-xs text-slate-700" key={group.id}>
+                      <input
+                        checked={notificationGroupFilterIds.includes(group.id)}
+                        onChange={(event) =>
+                          setNotificationGroupFilterIds((current) => {
+                            const next = new Set(current);
+                            if (event.target.checked) {
+                              next.add(group.id);
+                            } else {
+                              next.delete(group.id);
+                            }
+                            return [...next];
+                          })
+                        }
+                        type="checkbox"
+                      />
+                      <span>{group.name}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+            {notificationGroupFilterIds.length > 0 && (
+              <button
+                className="mt-2 text-xs font-medium text-amber-800 underline-offset-2 hover:underline"
+                onClick={() => setNotificationGroupFilterIds([])}
+                type="button"
+              >
+                נקה בחירת קבוצות
+              </button>
+            )}
           </div>
 
           <div>
@@ -1199,6 +1419,15 @@ export default function Dashboard() {
           {lastBatchSessionId && (
             <p className="text-xs text-slate-500">מזהה סשן אחרון: {lastBatchSessionId}</p>
           )}
+
+          <button
+            className="w-full rounded-lg border border-wedding-gold/40 bg-white px-4 py-2 text-sm font-medium text-wedding-charcoal transition hover:bg-stone-50 sm:w-auto"
+            onClick={() => setShowWhatsAppRecipientsPreview(true)}
+            type="button"
+          >
+            הצג רשימה מסוננת
+            {!continueFromLastBatch ? ` (${whatsAppRecipientsPreview.length})` : ''}
+          </button>
 
           {sendingNotifications && sendProgress && (
             <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
@@ -1267,26 +1496,101 @@ export default function Dashboard() {
             </div>
           </div>
         )}
-        <div className="flex flex-col gap-3 border-b border-stone-200 bg-stone-50 p-4 sm:flex-row">
-          <input
-            className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-slate-700 placeholder:text-slate-400 focus:border-amber-500 focus:outline-none sm:flex-1"
-            onChange={(event) => setSearchQuery(event.target.value)}
-            placeholder="חיפוש אורח לפי שם או טלפון..."
-            type="text"
-            value={searchQuery}
-          />
-          <select
-            className="rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-amber-500 focus:outline-none sm:w-56"
-            onChange={(event) =>
-              setStatusFilter(event.target.value as 'All' | Guest['status'] | 'Maybe')
-            }
-            value={statusFilter}
-          >
-            <option value="All">כל הסטטוסים</option>
-            <option value="Attending">מגיע</option>
-            <option value="Not Attending">לא מגיע</option>
-            <option value="Maybe">מתלבט</option>
-          </select>
+        <div className="space-y-3 border-b border-stone-200 bg-stone-50 p-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-end">
+            <div className="min-w-0 flex-1 lg:min-w-[200px]">
+              <label className="mb-1 block text-xs font-medium text-slate-600" htmlFor="guest-list-search">
+                חיפוש
+              </label>
+              <input
+                className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-slate-700 placeholder:text-slate-400 focus:border-amber-500 focus:outline-none"
+                id="guest-list-search"
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="שם או טלפון..."
+                type="text"
+                value={searchQuery}
+              />
+            </div>
+            <div className="w-full sm:w-auto sm:min-w-[160px]">
+              <label className="mb-1 block text-xs font-medium text-slate-600" htmlFor="guest-list-status">
+                סטטוס אישור
+              </label>
+              <select
+                className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-amber-500 focus:outline-none sm:w-56"
+                id="guest-list-status"
+                onChange={(event) => setStatusFilter(event.target.value as GuestTableStatusFilter)}
+                value={statusFilter}
+              >
+                <option value="All">כל האורחים</option>
+                <option value="Attending">אישרו הגעה</option>
+                <option value="Pending">ממתינים לתשובה</option>
+                <option value="Not Attending">לא מגיעים</option>
+              </select>
+            </div>
+            <div className="w-full min-w-0 lg:max-w-md">
+              <p className="mb-1 text-xs font-medium text-slate-600">קבוצות</p>
+              <p className="mb-2 text-[11px] text-slate-500">
+                אורח יוצג אם שייך לאחת מהקבוצות המסומנות. ללא סימון — כל הקבוצות.
+              </p>
+              <div className="max-h-24 overflow-y-auto rounded-lg border border-stone-200 bg-white px-2 py-2">
+                {groups.length === 0 ? (
+                  <span className="text-xs text-slate-400">אין קבוצות</span>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {groups.map((group) => (
+                      <label className="inline-flex items-center gap-1 text-xs text-slate-700" key={group.id}>
+                        <input
+                          checked={listGroupFilterIds.includes(group.id)}
+                          onChange={(event) =>
+                            setListGroupFilterIds((current) => {
+                              const next = new Set(current);
+                              if (event.target.checked) {
+                                next.add(group.id);
+                              } else {
+                                next.delete(group.id);
+                              }
+                              return [...next];
+                            })
+                          }
+                          type="checkbox"
+                        />
+                        <span>{group.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {listGroupFilterIds.length > 0 && (
+                <button
+                  className="mt-1.5 text-[11px] font-medium text-amber-800 underline-offset-2 hover:underline"
+                  onClick={() => setListGroupFilterIds([])}
+                  type="button"
+                >
+                  נקה בחירת קבוצות
+                </button>
+              )}
+            </div>
+            <div className="w-full sm:w-auto sm:min-w-[160px]">
+              <label className="mb-1 block text-xs font-medium text-slate-600" htmlFor="guest-list-sent">
+                נשלחה הודעה
+              </label>
+              <select
+                className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-amber-500 focus:outline-none sm:w-56"
+                id="guest-list-sent"
+                onChange={(event) =>
+                  setListMessageSentFilter(event.target.value as NotificationMessageSentFilter)
+                }
+                value={listMessageSentFilter}
+              >
+                <option value="All">הכל</option>
+                <option value="Sent">כן</option>
+                <option value="Not Sent">לא</option>
+              </select>
+            </div>
+          </div>
+          <p className="text-xs text-slate-500">
+            מוצגים {visibleGuests.length} מתוך {guests.length} אורחים לפי הסינון.
+          </p>
         </div>
         <div className="overflow-x-auto">
           <table className="min-w-full text-right text-sm">
@@ -1307,9 +1611,13 @@ export default function Dashboard() {
                 <th className="px-4 py-3 text-xs font-semibold tracking-wider text-wedding-gold">
                   <button
                     className="inline-flex items-center gap-1 text-wedding-gold transition hover:text-amber-700"
-                    onClick={() =>
-                      setSortByStatusDirection((current) => (current === 'asc' ? 'desc' : 'asc'))
-                    }
+                    onClick={() => {
+                      if (primaryGuestTableSort !== 'status') {
+                        setPrimaryGuestTableSort('status');
+                        return;
+                      }
+                      setSortByStatusDirection((current) => (current === 'asc' ? 'desc' : 'asc'));
+                    }}
                     type="button"
                   >
                     סטטוס
@@ -1318,6 +1626,23 @@ export default function Dashboard() {
                 </th>
                 <th className="px-4 py-3 text-xs font-semibold tracking-wider text-wedding-gold">כמות אורחים</th>
                 <th className="px-4 py-3 text-xs font-semibold tracking-wider text-wedding-gold">כמות אורחים צפויה</th>
+                <th className="px-4 py-3 text-xs font-semibold tracking-wider text-wedding-gold">
+                  <button
+                    className="inline-flex items-center gap-1 text-wedding-gold transition hover:text-amber-700"
+                    onClick={() => {
+                      if (primaryGuestTableSort !== 'responseUpdated') {
+                        setPrimaryGuestTableSort('responseUpdated');
+                        setSortByResponseDirection('desc');
+                        return;
+                      }
+                      setSortByResponseDirection((current) => (current === 'desc' ? 'asc' : 'desc'));
+                    }}
+                    type="button"
+                  >
+                    עודכן
+                    <span>{sortByResponseDirection === 'desc' ? '▼' : '▲'}</span>
+                  </button>
+                </th>
                 <th className="px-4 py-3 text-xs font-semibold tracking-wider text-wedding-gold">נשלחה הודעה</th>
                 <th className="px-4 py-3 text-xs font-semibold tracking-wider text-wedding-gold">קבוצות</th>
                 <th className="px-4 py-3 text-xs font-semibold tracking-wider text-wedding-gold">פעולות</th>
@@ -1326,22 +1651,24 @@ export default function Dashboard() {
             <tbody className="divide-y divide-gray-100">
               {loading ? (
                 <tr>
-                  <td className="px-4 py-4 text-slate-500" colSpan={9}>
+                  <td className="px-4 py-4 text-slate-500" colSpan={10}>
                     טוען...
                   </td>
                 </tr>
               ) : error ? (
                 <tr>
-                  <td className="px-4 py-4 text-red-600" colSpan={9}>
+                  <td className="px-4 py-4 text-red-600" colSpan={10}>
                     {error}
                   </td>
                 </tr>
               ) : filteredGuests.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-4 text-slate-500" colSpan={9}>
-                    {searchQuery.trim()
-                      ? 'לא נמצאו אורחים התואמים לחיפוש.'
-                      : 'אין אורחים כרגע.'}
+                  <td className="px-4 py-4 text-slate-500" colSpan={10}>
+                    {guests.length === 0
+                      ? 'אין אורחים כרגע.'
+                      : searchQuery.trim()
+                        ? 'לא נמצאו אורחים התואמים לחיפוש ולסינון.'
+                        : 'אין אורחים התואמים לסינון הנוכחי. נסו לשנות את הסינון או את החיפוש.'}
                   </td>
                 </tr>
               ) : (
@@ -1444,6 +1771,9 @@ export default function Dashboard() {
                         guest.expectedPartySize
                       )}
                     </td>
+                    <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-600">
+                      {formatGuestResponseUpdatedCell(guest.rsvpResponseUpdatedAt)}
+                    </td>
                     <td className="px-4 py-3">
                       <span
                         className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${
@@ -1543,6 +1873,72 @@ export default function Dashboard() {
           </table>
         </div>
       </div>
+
+      {showWhatsAppRecipientsPreview && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
+          onClick={() => setShowWhatsAppRecipientsPreview(false)}
+          role="presentation"
+        >
+          <div
+            aria-labelledby="wa-preview-title"
+            aria-modal="true"
+            className="flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+          >
+            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-stone-200 px-4 py-3">
+              <h4 className="text-lg font-semibold text-slate-800" id="wa-preview-title">
+                מקבלי הודעת וואטסאפ
+              </h4>
+              <button
+                className="rounded-lg px-3 py-1.5 text-sm font-medium text-slate-600 transition hover:bg-stone-100"
+                onClick={() => setShowWhatsAppRecipientsPreview(false)}
+                type="button"
+              >
+                סגור
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+              {continueFromLastBatch ? (
+                <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+                  מסומן &quot;המשך סשן קודם&quot;: השרת שולח רק לאורחים שנכללו בסשן הקודם ועדיין לא קיבלו הודעה. אין תצוגה מקדימה מדויקת למצב זה מהדפדפן.
+                </p>
+              ) : (
+                <>
+                  {notificationSelectedOnly && selectedGuestIds.size === 0 ? (
+                    <p className="mb-3 text-sm text-rose-600">
+                      סומן &quot;מסומנים בלבד&quot; אך לא נבחרו אורחים בטבלה — לא יישלח לאף אחד.
+                    </p>
+                  ) : (
+                    <p className="mb-3 text-sm text-slate-600">
+                      לפי הסינון הנוכחי, יישלחו הודעות ל־
+                      <strong className="text-slate-900"> {whatsAppRecipientsPreview.length} </strong>
+                      אורחים אם תלחצו על &quot;שלח הודעות וואטסאפ&quot; (ובתנאי שהחיבור לוואטסאפ פעיל).
+                    </p>
+                  )}
+                  {whatsAppRecipientsPreview.length > 0 ? (
+                    <ul className="divide-y divide-stone-100 rounded-lg border border-stone-100">
+                      {whatsAppRecipientsPreview.map((guestRow) => (
+                        <li className="flex flex-wrap items-baseline justify-between gap-2 px-3 py-2.5 text-sm" key={guestRow.id}>
+                          <span className="font-medium text-slate-800">{guestRow.name}</span>
+                          <span className="text-slate-500" dir="ltr">
+                            {guestRow.phoneNumber}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    !notificationSelectedOnly || selectedGuestIds.size > 0 ? (
+                      <p className="text-sm text-slate-500">אין אורחים התואמים לסינון.</p>
+                    ) : null
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
