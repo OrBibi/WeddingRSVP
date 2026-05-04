@@ -70,9 +70,11 @@ export default async function handler(req: any, res: any) {
     }
 
     const normalizedPartySize = Math.max(1, Math.floor(partySize));
+    const rsvpResponseUpdatedAt = new Date().toISOString();
     await guestRef.update({
       status,
       partySize: normalizedPartySize,
+      rsvpResponseUpdatedAt,
     });
 
     const refreshedDoc = await guestRef.get();
